@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ic-vote</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>ic-vote <span class="version">V0</span></h1>
+      <p class="tagline">
+        Public ballots, verifiable client. This page checks itself before it
+        lets you vote.
+      </p>
+    </header>
+
+    <!--
+      The verdict panel comes before the ballot in the document, not just
+      visually. A voter who scrolls past a warning to reach the ballot has
+      been shown the warning; a voter who reaches the ballot first has not.
+    -->
+    <section id="verdict-panel" class="panel">
+      <h2>Can you trust this page?</h2>
+      <div id="verdict-badge" class="badge pending">CHECKING</div>
+      <p id="verdict-summary">Running provenance checks...</p>
+      <ul id="verdict-checks" class="checks"></ul>
+      <div id="verdict-warnings"></div>
+      <details>
+        <summary>What this check does and does not prove</summary>
+        <p>
+          A passing check means the bytes running in this browser hash to a
+          bundle attested on-chain at a reviewed commit, served by a canister
+          whose module hash independent verifiers reproduced from source. That
+          closes <em>malicious server serves malicious client</em>.
+        </p>
+        <p>
+          It does <strong>not</strong> close a compromised browser or operating
+          system, which reads your choice before any of this runs, and it does
+          not make the reviewed code correct &mdash; only identical to what was
+          reviewed. It does not prevent coercion. See THREAT_MODEL.md.
+        </p>
+      </details>
+    </section>
+
+    <section id="setup" class="panel hidden">
+      <h2>Not configured</h2>
+      <p id="setup-detail"></p>
+    </section>
+
+    <section id="elections" class="panel hidden">
+      <h2>Elections</h2>
+      <ul id="election-list"></ul>
+    </section>
+
+    <section id="election" class="panel hidden">
+      <h2 id="election-title"></h2>
+      <p id="election-question" class="question"></p>
+      <dl id="election-facts" class="facts"></dl>
+
+      <div id="identity-block">
+        <h3>Your identity</h3>
+        <p id="identity-principal" class="mono"></p>
+        <p id="identity-status"></p>
+        <p class="caveat">
+          This demo keeps an Ed25519 key in this browser's local storage. That
+          is adequate for evaluating V0 and is <strong>not</strong> how an
+          organization should enrol members; see THREAT_MODEL.md T4.
+        </p>
+      </div>
+
+      <div id="ballot-block">
+        <h3>Ballot</h3>
+        <div id="ballot-gate"></div>
+        <form id="ballot"></form>
+      </div>
+
+      <div id="receipt" class="hidden">
+        <h3>Your receipt</h3>
+        <p>
+          Keep this. It is the hash of the log up to and including your ballot,
+          so it cannot be produced without every entry before yours. If the
+          published board ever stops containing it, the board was rewritten.
+        </p>
+        <pre id="receipt-body" class="mono"></pre>
+      </div>
+
+      <div id="board-block">
+        <h3>Bulletin board</h3>
+        <p class="caveat">
+          Every number below is recomputed in this browser from the published
+          ballot log. The canister's own tally is not used.
+        </p>
+        <div id="board"></div>
+        <button id="export" type="button">
+          Export bulletin for independent verification
+        </button>
+        <p class="caveat">
+          Downloads the raw board. Check it on a machine that never loaded this
+          page: <code class="mono">node tools/verify-election.mjs --file bulletin.json</code>
+        </p>
+      </div>
+    </section>
+
+    <footer>
+      <p>
+        ic-vote V0 has <strong>no ballot secrecy</strong>, deliberately. Every
+        ballot here is public and attributable. Suitable only for votes that
+        are already public.
+      </p>
+    </footer>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

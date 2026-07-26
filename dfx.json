@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "canisters": {
+    "poll": {
+      "type": "rust",
+      "package": "ic_vote_poll",
+      "candid": "canisters/poll/poll.did"
+    },
+    "site": {
+      "type": "assets",
+      "source": ["site"]
+    }
+  },
+  "defaults": {
+    "build": {
+      "packtool": ""
+    }
+  },
+  "output_env_file": ".env"
+}

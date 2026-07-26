@@ -1,0 +1,14 @@
+# Pinned toolchain, matching ic-git's (REPRODUCIBLE_BUILD.md).
+#
+# The rust version is embedded in the module's `icp:public dfx` metadata
+# section, so changing it changes the module hash and invalidates every
+# existing attestation of this canister. Bump deliberately and re-attest.
+#
+# It is also a field in the BuildDescriptor whose sha256 is the recipeHash
+# (ic-git docs/ATTESTATION.md), so it must match what verifiers actually ran
+# or their attestations agree on a recipeHash while disagreeing on a module
+# hash -- the failure mode that document calls indistinguishable from a lie.
+[toolchain]
+channel = "1.94.1"
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"

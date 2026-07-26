@@ -1,0 +1,20 @@
+[package]
+name = "ic_vote_poll"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+# Kept deliberately small. Every dependency here is source a build reviewer
+# (T3 in THREAT_MODEL.md) has to read or vouch for, and the reviewers are the
+# thing standing between the module hash and "the reviewed code". A dependency
+# is a permanent tax on that review, so V0 adds none it can avoid: no stable
+# structures (state is one candid-serializable struct), no serde_json, no
+# crypto beyond sha256.
+[dependencies]
+ic-cdk = "0.20"
+candid = "0.10"
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+hex = "0.4"

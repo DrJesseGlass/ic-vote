@@ -1,0 +1,12 @@
+[workspace]
+members = ["canisters/poll"]
+resolver = "2"
+
+# Matches ic-git's release profile. These flags are load-bearing for
+# reproducibility: codegen-units = 1 and lto = true remove the parallel-codegen
+# nondeterminism that would otherwise make two honest verifiers compute
+# different module hashes from the same commit.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1

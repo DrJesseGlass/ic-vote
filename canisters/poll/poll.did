@@ -1,0 +1,188 @@
+type BallotView = record {
+  at : nat64;
+  seq : nat64;
+  voter : principal;
+  // 64-hex chain head after this entry -- the voter's receipt.
+  entry_hash : text;
+  choice : nat32;
+};
+// A log head plus everything needed to tie it to the canister's certified
+// data without trusting the reply.
+type CertifiedHead = record {
+  ballot_count : nat64;
+  // The IC state certificate, whose `certified_data` is that root.
+  // 
+  // `None` outside a query call (`data_certificate` is unavailable in
+  // updates). A client that receives `None` must treat the head as
+  // UNVERIFIED, never as verified-by-absence.
+  certificate : opt blob;
+  // 64-hex.
+  log_head : text;
+  election_id : nat64;
+  // Sibling path from this election's leaf to the Merkle root.
+  witness : vec WitnessStep;
+  // 64-hex. Zero hash while the election is a draft.
+  manifest_hash : text;
+};
+// Summary. Excludes the roll and the log, which have their own paginated
+// endpoints because either can be large.
+type ElectionView = record {
+  id : nat64;
+  pin : opt Pin;
+  ballot_count : nat64;
+  title : text;
+  admin : principal;
+  closed_at : opt nat64;
+  question : text;
+  opened_at : opt nat64;
+  // 64-hex head of the ballot log.
+  log_head : text;
+  created_at : nat64;
+  roll_size : nat64;
+  // 64-hex. `None` until the election opens and the manifest freezes.
+  manifest_hash : opt text;
+  phase : Phase;
+  options : vec text;
+};
+// Exactly the fields that go into `manifest_hash`, so a client can recompute
+// it rather than believe the canister's copy.
+type Manifest = record {
+  id : nat64;
+  pin : Pin;
+  title : text;
+  admin : principal;
+  question : text;
+  opened_at : nat64;
+  // 64-hex over the sorted roll.
+  roll_hash : text;
+  // 64-hex. Advisory: recompute it, do not trust it.
+  manifest_hash : text;
+  options : vec text;
+};
+type NewElection = record { title : text; question : text; options : vec text };
+type Phase = variant {
+  // Voting window. Manifest is frozen; ballots are accepted.
+  Open;
+  // Window closed. Log and tally are final.
+  Closed;
+  // Being set up. Roll and pin are mutable; nothing is committed.
+  Draft;
+};
+// The release a voter's client must be running for this election.
+// 
+// This is the load-bearing anti-malicious-client record (THREAT_MODEL.md
+// 2.1 and 2.5). It lives inside the manifest hash, so an administrator
+// cannot repoint an open election at a different frontend build without
+// invalidating every ballot's chain position -- pinning the expected module
+// hash "for the duration of the voting window" is a state invariant here,
+// not a deployment convention.
+type Pin = record {
+  // ic-git repo name. The registry record actually read is
+  // `<repo>#site` (ic-git docs/ATTESTATION.md, "The two record types").
+  repo : text;
+  // 64-hex sha256 of the served bundle entrypoint.
+  bundle_sha256 : text;
+  // Principal of the ic-git canister serving that bundle.
+  site_canister : text;
+  // Registry contract address on that chain.
+  registry_address : text;
+  // 64-hex module hash that canister is expected to be running for the
+  // whole window. A certified read that differs is a spoiling event.
+  module_sha256 : text;
+  // 40-hex git commit the bundle was published from.
+  commit : text;
+  // EVM chain holding the ProvenanceRegistry for this election.
+  registry_chain_id : nat64;
+};
+type Receipt = record {
+  at : nat64;
+  seq : nat64;
+  voter : principal;
+  entry_hash : text;
+  log_head : text;
+  election_id : nat64;
+  choice : nat32;
+};
+type Result = variant { Ok : Receipt; Err : VoteError };
+type Result_1 = variant { Ok : CertifiedHead; Err : VoteError };
+type Result_2 = variant { Ok : ElectionView; Err : VoteError };
+type Result_3 = variant { Ok : nat64; Err : VoteError };
+type Result_4 = variant { Ok : vec BallotView; Err : VoteError };
+type Result_5 = variant { Ok : Manifest; Err : VoteError };
+type Result_6 = variant { Ok : vec principal; Err : VoteError };
+type Result_7 = variant { Ok : Tally; Err : VoteError };
+type Result_8 = variant { Ok; Err : VoteError };
+type Tally = record {
+  ballot_count : nat64;
+  // 64-hex over (manifest, log head, counts). The value to checkpoint.
+  // `None` before the manifest freezes.
+  tally_hash : opt text;
+  log_head : text;
+  election_id : nat64;
+  roll_size : nat64;
+  // 64-hex. `None` before the manifest freezes.
+  manifest_hash : opt text;
+  phase : Phase;
+  counts : vec nat64;
+  options : vec text;
+};
+type VoteError = variant {
+  AlreadyVoted;
+  InvalidChoice;
+  InvalidInput : text;
+  NoPin;
+  NotFound;
+  WrongPhase : record { actual : text; expected : text };
+  NotAdmin;
+  EmptyRoll;
+  NotEligible;
+  AnonymousCaller;
+};
+type WitnessStep = record {
+  // 64-hex.
+  sibling : text;
+  sibling_is_right : bool;
+};
+service : () -> {
+  // Cast one ballot. The caller's principal is the signature: the IC has
+  // already authenticated the message envelope, so there is no separate
+  // signature to check or to get wrong.
+  cast : (nat64, nat32) -> (Result);
+  // The log head, its Merkle witness, and the IC state certificate.
+  // 
+  // This is the one read that does not require trusting the replying replica:
+  // verify the certificate against the NNS root key, extract `certified_data`,
+  // and check that recomputing the witness from this election's leaf yields it.
+  // 
+  // `certificate` is `None` when called as an update -- `data_certificate` is
+  // only populated in query context. A client that gets `None` has an
+  // unverified head and must say so; treating it as verified is the false-GREEN
+  // failure ic-git's attestation doctrine forbids.
+  certified_head : (nat64) -> (Result_1) query;
+  close_election : (nat64) -> (Result_2);
+  create_election : (NewElection) -> (Result_3);
+  get_election : (nat64) -> (Result_2) query;
+  get_log : (nat64, nat64, nat64) -> (Result_4) query;
+  // The exact preimage of `manifest_hash`. Returned so a client can recompute
+  // the hash instead of accepting the canister's word for it.
+  get_manifest : (nat64) -> (Result_5) query;
+  get_roll : (nat64, nat64, nat64) -> (Result_6) query;
+  // Convenience only. The tally that matters is the one a verifier recomputes
+  // from `get_log` (see `tools/verify-election.mjs`); this endpoint exists so a
+  // UI can render a number, and a client that displays it without recomputing
+  // it is trusting exactly the party E2E-V exists to distrust.
+  get_tally : (nat64) -> (Result_7) query;
+  list_elections : () -> (vec ElectionView) query;
+  open_election : (nat64) -> (Result_2);
+  // Pin the frontend release voters must be running. Draft only.
+  pin_release : (nat64, Pin) -> (Result_8);
+  // Replace the eligibility roll. Draft only. Returns the deduplicated size.
+  // 
+  // This is the T4 trust boundary in THREAT_MODEL.md: whoever calls this
+  // decides who is a voter, and no cryptography here constrains that choice.
+  // The roll is published (`get_roll`) and committed to by the manifest hash
+  // precisely so the organization's members can audit the list they were
+  // enrolled in.
+  set_roll : (nat64, vec principal) -> (Result_3);
+  whoami : () -> (principal) query;
+}
