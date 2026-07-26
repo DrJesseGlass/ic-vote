@@ -18,6 +18,11 @@ cargo test -p ic_vote_poll
 say "canister builds for wasm32"
 cargo build -p ic_vote_poll --release --target wasm32-unknown-unknown
 
+say "every tracked file is pure ASCII"
+# Implemented in Node, not as a grep pipeline: see the header of that file for
+# why the obvious shell spelling fails open on BSD grep.
+node tools/check-ascii.mjs
+
 say "frontend library tests (offline)"
 node tools/test-site-lib.mjs
 

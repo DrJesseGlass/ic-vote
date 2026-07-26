@@ -247,7 +247,14 @@ function renderVerdict(verdict, overrideSummary) {
   list.replaceChildren(
     ...verdict.checks.map((c) =>
       el("li", {}, [
-        el("span", { className: `state ${c.state}`, textContent: { OK: "✓", UNKNOWN: "?", BAD: "✗" }[c.state] }),
+        // ASCII markers rather than check/cross glyphs: the whole bundle is
+        // ASCII by policy (tools/check.sh asserts it), so its sha256 cannot
+        // shift on an encoding difference between what a reviewer reads and
+        // what the canister serves.
+        el("span", {
+          className: `state ${c.state}`,
+          textContent: { OK: "OK", UNKNOWN: "??", BAD: "!!" }[c.state],
+        }),
         el("span", {}, [c.label, el("span", { className: "detail", textContent: c.detail ?? "" })]),
       ])
     )
@@ -269,7 +276,10 @@ function renderElectionList() {
           onclick: () => selectElection(e.id),
         }, [
           el("div", { textContent: e.title }),
-          el("div", { className: "meta", textContent: `${phaseName(e.phase)} · ${e.ballot_count}/${e.roll_size} voted` }),
+          el("div", {
+            className: "meta",
+            textContent: `${phaseName(e.phase)} - ${e.ballot_count}/${e.roll_size} voted`,
+          }),
         ]),
       ])
     )

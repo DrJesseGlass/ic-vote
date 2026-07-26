@@ -144,7 +144,7 @@ changes the whole design.
 - vetKeys overview: https://docs.internetcomputer.org/references/vetkeys-overview
 - Niobium milestone: https://www.crypto-reporter.com/press-releases/dfinity-foundation-launches-niobium-milestone-bringing-new-levels-of-privacy-with-vetkeys-technology-on-the-internet-computer-102931/
 
-Voting literature referenced in VISION.md (Punchscan 2004, Prêt à Voter 2005,
+Voting literature referenced in VISION.md (Punchscan 2004, Pret a Voter 2005,
 Benaloh challenge 2006, Helios 2008, ElectionGuard, JCJ/Civitas) is cited from
 general knowledge and should be given proper citations before any of this is
 published externally.

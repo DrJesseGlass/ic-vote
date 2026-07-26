@@ -82,13 +82,13 @@ h3 { margin: 1.5rem 0 0.5rem; font-size: 0.95rem; text-transform: uppercase; let
 .checks { list-style: none; padding: 0; margin: 1rem 0 0; }
 .checks li {
   display: grid;
-  grid-template-columns: 1.5rem 1fr;
+  grid-template-columns: 2rem 1fr;
   gap: 0.5rem;
   padding: 0.4rem 0;
   border-top: 1px solid var(--rule);
   align-items: start;
 }
-.checks .state { font-weight: 700; }
+.checks .state { font-weight: 700; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem; }
 .checks .state.OK { color: var(--green); }
 .checks .state.UNKNOWN { color: var(--yellow); }
 .checks .state.BAD { color: var(--red); }

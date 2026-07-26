@@ -17,7 +17,7 @@ E2E-verifiable (E2E-V) voting wants two properties:
 verifiable mixnets, plus zero-knowledge proofs published to a public bulletin
 board, let *anyone* recompute the result and check the proofs without trusting
 the election authority at all. This is mature work -- Chaum's Punchscan (2004),
-Prêt à Voter (2005), Helios (2008), Scantegrity, ElectionGuard -- and it does
+Pret a Voter (2005), Helios (2008), Scantegrity, ElectionGuard -- and it does
 what it says.
 
 We should reuse it wholesale. ic-vote invents no tallying cryptography.
