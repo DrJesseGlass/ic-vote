@@ -39,6 +39,13 @@ import {
   OK,
 } from "../site/lib/verifier.js";
 
+/// The identity used for the administrative calls the live test needs
+/// (creating an election and enrolling the generated voter). Named rather than
+/// ambient, for the reason in tools/check.sh: an administrative identity that
+/// gets picked up from whatever `dfx identity use` ran last is one nobody
+/// chose.
+const ADMIN_IDENTITY = process.env.ADMIN_IDENTITY ?? "icvote-admin";
+
 let passed = 0;
 let failed = 0;
 
@@ -416,19 +423,19 @@ async function live(canisterId, host) {
   check("self-authenticating principal has the right suffix",
     principalToBytes(voter).slice(-1)[0], 2);
 
-  const newId = dfx(["canister", "call", "--network", "local", "--identity", "icvote-demo-admin",
+  const newId = dfx(["canister", "call", "--network", "local", "--identity", ADMIN_IDENTITY,
     canisterId, "create_election",
     '(record { title = "agent test"; question = "does the hand-written agent work?"; options = vec { "yes"; "no" } })'])
     .match(/([0-9_]+) : nat64/)[1].replace(/_/g, "");
-  dfx(["canister", "call", "--network", "local", "--identity", "icvote-demo-admin", canisterId,
+  dfx(["canister", "call", "--network", "local", "--identity", ADMIN_IDENTITY, canisterId,
     "set_roll", `(${newId}:nat64, vec { principal "${voter}" })`]);
-  dfx(["canister", "call", "--network", "local", "--identity", "icvote-demo-admin", canisterId,
+  dfx(["canister", "call", "--network", "local", "--identity", ADMIN_IDENTITY, canisterId,
     "pin_release", `(${newId}:nat64, record {
       repo = "ic-vote"; commit = "${"0".repeat(40)}"; bundle_sha256 = "${"0".repeat(64)}";
       site_canister = "umobs-yiaaa-aaaab-agyrq-cai"; module_sha256 = "${"0".repeat(64)}";
       registry_chain_id = 11155111:nat64;
       registry_address = "0xa1362DAda583c56a395D305a8C7A458E0B62A209" })`]);
-  dfx(["canister", "call", "--network", "local", "--identity", "icvote-demo-admin", canisterId,
+  dfx(["canister", "call", "--network", "local", "--identity", ADMIN_IDENTITY, canisterId,
     "open_election", `(${newId}:nat64)`]);
 
   const signing = new Agent({ host, canisterId, identity });

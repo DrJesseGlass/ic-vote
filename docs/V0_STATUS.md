@@ -91,6 +91,36 @@ name. An empty set produces RED, and RED is correct.
    cross-checked against Node's SHA3-256 because Ethereum's keccak has no
    reference implementation in any runtime we ship on.
 
+## The controller is a party, and it is not on the trust list
+
+Whoever deploys a canister is its controller, and a controller can upgrade it.
+For the poll canister that is the ability to replace the code counting the
+ballots, mid-election. THREAT_MODEL.md's trust table lists the election
+administrator (T6) as trusted "for availability only", which is right for the
+`open_election`/`close_election` role but says nothing about the controller.
+
+The controller is not on the trust list because it is *contained* rather than
+trusted: an upgraded canister has a module hash that no longer matches the one
+the election pinned when it opened, so `site/lib/verifier.js` reports RED and
+the ballot is blocked. That containment is the whole reason the pin lives
+inside the manifest hash instead of in a config file.
+
+Two consequences worth stating plainly:
+
+1. The containment is only as good as the module-hash read, and that read is
+   currently capped at UNKNOWN because the certificate is unauthenticated (see
+   above). Until ic-git dependency 1 lands, a controller who upgrades the
+   canister is detectable but not provably so.
+2. Because the controller matters, every script here names its identity
+   explicitly instead of inheriting the ambient `dfx` selection:
+   `tools/check.sh` deploys as `DEPLOY_IDENTITY` (default `icvote-admin`) and
+   prints the resulting controller list, `tools/demo-election.sh` administers
+   as `ADMIN_IDENTITY`, and voters use their own `--identity` per call so
+   nothing mutates the operator's selected identity. This is not tidiness. An
+   early run of these scripts deployed under an ambient identity that nobody
+   had chosen for the purpose, which is exactly how a canister ends up with a
+   controller no one can account for.
+
 ## Known rough edges
 
 - The `site` canister in `dfx.json` is dfx's asset canister, for local

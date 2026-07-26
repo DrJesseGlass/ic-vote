@@ -31,9 +31,23 @@ say "local replica"
 dfx stop >/dev/null 2>&1 || true
 dfx start --background --clean >/dev/null 2>&1
 trap 'dfx stop >/dev/null 2>&1 || true' EXIT
-dfx deploy poll >/dev/null
-dfx deploy site >/dev/null
+
+# The deploy identity becomes the canister's CONTROLLER, and a controller can
+# upgrade the canister -- which is THREAT_MODEL.md 2.5, silent code change
+# mid-election. That is the one privilege here that must never be picked up
+# implicitly from whatever `dfx identity use` happened to run last, so it is
+# named. Override with DEPLOY_IDENTITY for a real deployment.
+DEPLOY_IDENTITY="${DEPLOY_IDENTITY:-icvote-admin}"
+dfx identity new --storage-mode plaintext "$DEPLOY_IDENTITY" </dev/null >/dev/null 2>&1 || true
+echo "  deploying as $DEPLOY_IDENTITY ($(dfx identity get-principal --identity "$DEPLOY_IDENTITY"))"
+dfx deploy --identity "$DEPLOY_IDENTITY" poll >/dev/null
+dfx deploy --identity "$DEPLOY_IDENTITY" site >/dev/null
 CID="$(dfx canister id poll)"
+
+say "controllers of the deployed canisters"
+# Printed rather than assumed: if this ever lists an identity nobody intended,
+# that is a finding, and it should be visible in the check output.
+dfx canister status --identity "$DEPLOY_IDENTITY" poll 2>&1 | grep -i "controllers" || true
 
 say "end-to-end election"
 tools/demo-election.sh

@@ -19,9 +19,9 @@ set -euo pipefail
 NETWORK="${NETWORK:-local}"
 VOTERS=(icvote-demo-a icvote-demo-b icvote-demo-c)
 OUTSIDER=icvote-demo-outsider
-# Its own identity by default, rather than whatever the user has selected: the
-# demo must not depend on -- or implicate -- a real operator identity.
-ADMIN="${ADMIN_IDENTITY:-icvote-demo-admin}"
+# A named identity by default, rather than whatever the user has selected: the
+# demo must not depend on -- or implicate -- an unrelated operator identity.
+ADMIN="${ADMIN_IDENTITY:-icvote-admin}"
 
 say() { printf '\n\033[1m== %s\033[0m\n' "$1"; }
 call() { dfx canister call --network "$NETWORK" --identity "$1" poll "${@:2}"; }
