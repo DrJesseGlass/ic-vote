@@ -84,10 +84,29 @@ type Pin = record {
   bundle_sha256 : text;
   // Principal of the ic-git canister serving that bundle.
   site_canister : text;
+  // 64-hex module hash the *poll* canister -- this one, the one holding the
+  // roll, the log and the tally -- is expected to be running for the whole
+  // window.
+  // 
+  // Separate from `module_sha256` because they are different canisters with
+  // different controllers and different powers. `module_sha256` covers the
+  // party who can change the ballot *page*; this covers the party who can
+  // change the code that *counts*. An earlier version of this design had
+  // only the first and documented it as covering both, which meant a poll
+  // canister could be upgraded mid-election to code that mis-tallies or
+  // rewrites the log with no change to any verdict a voter sees.
+  // 
+  // What this is: a value the administrator declares before the window
+  // opens, frozen into the manifest hash, that a client compares against a
+  // certified read. What it is not: proof the declared value was ever the
+  // right one. It makes a mid-window *change* visible, which is the attack
+  // in THREAT_MODEL.md 2.5; it does not establish the starting point. That
+  // is what the K-of-N attestation on the module hash is for.
+  poll_module_sha256 : text;
   // Registry contract address on that chain.
   registry_address : text;
-  // 64-hex module hash that canister is expected to be running for the
-  // whole window. A certified read that differs is a spoiling event.
+  // 64-hex module hash the *site* canister is expected to be running for
+  // the whole window. A certified read that differs is a spoiling event.
   module_sha256 : text;
   // 40-hex git commit the bundle was published from.
   commit : text;

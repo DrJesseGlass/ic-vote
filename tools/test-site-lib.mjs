@@ -44,7 +44,13 @@ import {
 /// ambient, for the reason in tools/check.sh: an administrative identity that
 /// gets picked up from whatever `dfx identity use` ran last is one nobody
 /// chose.
-const ADMIN_IDENTITY = process.env.ADMIN_IDENTITY ?? "icvote-admin";
+///
+/// `||` rather than `??` on purpose: shell's `${VAR:-default}` treats an
+/// exported-but-empty variable as unset, and `??` does not. With `??`, an empty
+/// `ADMIN_IDENTITY` from a CI matrix or a sourced env file would make
+/// demo-election.sh fall back to its default and pass, then send `--identity ''`
+/// from here and die mid-run. The two must agree on what "unset" means.
+const ADMIN_IDENTITY = process.env.ADMIN_IDENTITY || "icvote-localtest-admin";
 
 let passed = 0;
 let failed = 0;
@@ -231,6 +237,7 @@ group("verdict rules", () => {
     bundle_sha256: "b".repeat(64),
     site_canister: "umobs-yiaaa-aaaab-agyrq-cai",
     module_sha256: "c".repeat(64),
+    poll_module_sha256: "7".repeat(64),
     registry_chain_id: 11155111,
     registry_address: "0x0000000000000000000000000000000000000001",
   };
@@ -239,6 +246,7 @@ group("verdict rules", () => {
     served: { sha256: "b".repeat(64), commitHeader: "a".repeat(40) },
     registryRecord: { commit: "a".repeat(40), bundleHash: "b".repeat(64), updatedAt: 1n },
     liveModuleHash: { hash: "c".repeat(64), signature: { status: OK } },
+    livePollModuleHash: { hash: "7".repeat(64), signature: { status: OK } },
     attestations: [
       { verifier: "0xA", moduleHash: "c".repeat(64), commit: "d".repeat(40), recipeHash: "e".repeat(64) },
       { verifier: "0xB", moduleHash: "c".repeat(64), commit: "d".repeat(40), recipeHash: "e".repeat(64) },
@@ -272,6 +280,38 @@ group("verdict rules", () => {
 
   check("no trusted attestation for the running wasm -> RED",
     computeVerdict({ ...healthy, attestations: [] }).verdict, RED);
+
+  // The gap the review found: the poll canister -- the one that counts the
+  // ballots -- was never observed at all, so upgrading it produced no change
+  // in any verdict a voter sees.
+  check("poll canister upgraded away from its pin -> RED",
+    computeVerdict({
+      ...healthy,
+      livePollModuleHash: { hash: "8".repeat(64), signature: { status: OK } },
+    }).verdict, RED);
+
+  check("poll canister upgrade blocks the ballot",
+    computeVerdict({
+      ...healthy,
+      livePollModuleHash: { hash: "8".repeat(64), signature: { status: OK } },
+    }).ballot, "blocked");
+
+  check("poll canister's module hash unreadable cannot reach GREEN",
+    computeVerdict({ ...healthy, livePollModuleHash: { error: "unreachable" } }).verdict, YELLOW);
+
+  check("an unverified poll certificate cannot reach GREEN",
+    computeVerdict({
+      ...healthy,
+      livePollModuleHash: { hash: "7".repeat(64), signature: { status: "UNAVAILABLE" } },
+    }).verdict, YELLOW);
+
+  // The two pins must not be interchangeable: a site hash accepted in the poll
+  // slot would let one attested canister vouch for the other.
+  check("site and poll pins are not interchangeable",
+    computeVerdict({
+      ...healthy,
+      livePollModuleHash: { hash: "c".repeat(64), signature: { status: OK } },
+    }).verdict, RED);
 
   check("below threshold -> YELLOW",
     computeVerdict({ ...healthy, attestations: [healthy.attestations[0]] }).verdict, YELLOW);
@@ -381,6 +421,24 @@ if (liveIdx >= 0) {
 
 async function live(canisterId, host) {
   console.log(`\nlive replica ${host} canister ${canisterId}`);
+
+  // This file documents itself as runnable standalone (`--live <id>`), but the
+  // administrative calls below need ADMIN_IDENTITY to exist -- and it is
+  // tools/demo-election.sh, not this file, that creates it. Standalone runs
+  // therefore used to die inside the agent test with a raw execFileSync stack
+  // trace that reads like a decoder bug. Create it here if it is missing, so
+  // the file's own documented usage works.
+  try {
+    execFileSync("dfx", ["identity", "get-principal", "--identity", ADMIN_IDENTITY], {
+      stdio: "ignore",
+    });
+  } catch {
+    console.log(`  (creating missing throwaway identity '${ADMIN_IDENTITY}')`);
+    execFileSync("dfx", ["identity", "new", "--storage-mode", "plaintext", ADMIN_IDENTITY], {
+      stdio: "ignore",
+    });
+  }
+
   const agent = new Agent({ host, canisterId });
 
   const elections = await agent.query("list_elections");
@@ -395,6 +453,27 @@ async function live(canisterId, host) {
 
   // The decoder is only trustworthy if the values it produces are the ones
   // the canister meant; recomputing the hashes from them is that check.
+  // A field the canister returns but candid.js has no name for decodes to
+  // `_<hash>_`. That is by design -- better a visibly broken field than a
+  // silently dropped one -- but it must never survive into a release: adding
+  // `poll_module_sha256` to the Pin without registering its name here made
+  // every manifest hash in the browser wrong while the CLI verifier, which
+  // reads dfx's JSON, still agreed with the canister.
+  const unnamed = [];
+  const scan = (value, path) => {
+    if (Array.isArray(value)) return value.forEach((v, i) => scan(v, `${path}[${i}]`));
+    if (value && typeof value === "object" && !(value instanceof Uint8Array)) {
+      for (const [k, v] of Object.entries(value)) {
+        if (/^_\d+_$/.test(k)) unnamed.push(`${path}.${k}`);
+        scan(v, `${path}.${k}`);
+      }
+    }
+  };
+  scan(manifest, "manifest");
+  scan(head, "certified_head");
+  scan(elections, "list_elections");
+  check("every decoded field has a registered name", unnamed, []);
+
   const board = eh.recomputeBoard({
     manifest: { ...manifest, id: manifest.id },
     roll,
@@ -433,6 +512,7 @@ async function live(canisterId, host) {
     "pin_release", `(${newId}:nat64, record {
       repo = "ic-vote"; commit = "${"0".repeat(40)}"; bundle_sha256 = "${"0".repeat(64)}";
       site_canister = "umobs-yiaaa-aaaab-agyrq-cai"; module_sha256 = "${"0".repeat(64)}";
+      poll_module_sha256 = "${"0".repeat(64)}";
       registry_chain_id = 11155111:nat64;
       registry_address = "0xa1362DAda583c56a395D305a8C7A458E0B62A209" })`]);
   dfx(["canister", "call", "--network", "local", "--identity", ADMIN_IDENTITY, canisterId,

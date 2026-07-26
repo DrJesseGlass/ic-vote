@@ -65,7 +65,7 @@ export const POLL_NAMES = [
   "election_id", "seq", "voter", "choice", "at", "entry_hash",
   "witness", "sibling", "sibling_is_right", "certificate",
   "repo", "commit", "bundle_sha256", "site_canister", "module_sha256",
-  "registry_chain_id", "registry_address",
+  "poll_module_sha256", "registry_chain_id", "registry_address",
 ];
 
 let NAME_BY_HASH = null;

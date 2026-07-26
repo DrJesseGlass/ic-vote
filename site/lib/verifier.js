@@ -26,6 +26,63 @@ export const BAD = "BAD";
 const RANK = { [GREEN]: 0, [YELLOW]: 1, [RED]: 2 };
 const worse = (a, b) => (RANK[b] > RANK[a] ? b : a);
 
+/// One canister's module hash: read it, and compare it against what the
+/// election pinned. Returns the live hash, or null if it could not be
+/// established.
+///
+/// Note the asymmetry between the two failure modes, because it is the
+/// weakest point in the current design and should be visible in the code
+/// rather than only in the docs: a hash that MISMATCHES is BAD (RED, ballot
+/// blocked), but a hash that cannot be READ is UNKNOWN (YELLOW, which the UI
+/// lets a voter click past). An attacker who can make the read fail therefore
+/// gets a softer outcome than one who lets it succeed and mismatch. Closing
+/// that means deciding a voting window should hard-block on an unreachable
+/// canister, which is a change to the verdict ladder in THREAT_MODEL.md
+/// section 4, not a change to this function.
+function checkCanister(c, id, label, reading, pinned) {
+  const live = reading && !reading.error ? reading.hash : null;
+
+  if (!live) {
+    c.add(
+      `${id}-module-read`,
+      `${label}'s module hash read`,
+      UNKNOWN,
+      reading?.error ?? "could not read module_hash"
+    );
+  } else if (reading.signature?.status !== OK) {
+    // The read succeeded and the value is structurally present, but nothing
+    // has authenticated it. This is the ic-git dependency-1 hole, and it is
+    // the single reason this app cannot currently reach GREEN.
+    c.add(
+      `${id}-module-read`,
+      `${label}'s module hash read`,
+      UNKNOWN,
+      `${live.slice(0, 16)}... read from an UNAUTHENTICATED certificate: ` +
+        (reading.signature?.reason ?? "signature not verified")
+    );
+  } else {
+    c.add(`${id}-module-read`, `${label}'s module hash read`, OK, live);
+  }
+
+  if (!live) {
+    c.add(`${id}-module-pin`, `${label} matches the election's pin`, UNKNOWN, "no live hash to compare");
+  } else if (live === pinned) {
+    c.add(`${id}-module-pin`, `${label} matches the election's pin`, OK, live.slice(0, 16) + "...");
+  } else {
+    // THREAT_MODEL.md 2.5: for an election specifically, a module hash that
+    // differs from the one pinned for the window is a spoiling event, not a
+    // notice -- even if the new hash is itself well attested.
+    c.add(
+      `${id}-module-pin`,
+      `${label} matches the election's pin`,
+      BAD,
+      `live ${live.slice(0, 16)}... but the election pinned ${String(pinned).slice(0, 16)}...`
+    );
+  }
+
+  return live;
+}
+
 class Checks {
   constructor() {
     this.list = [];
@@ -43,7 +100,8 @@ class Checks {
 ///   pin               the election's Pin record (from get_manifest)
 ///   served            { sha256, commitHeader, repoHeader } or { error }
 ///   registryRecord    { commit, bundleHash, updatedAt } | null | { error }
-///   liveModuleHash    { hash, signature: { status } } | { error }
+///   liveModuleHash      { hash, signature: { status } } | { error } -- site
+///   livePollModuleHash  { hash, signature: { status } } | { error } -- poll
 ///   attestations      array of { verifier, moduleHash, commit, recipeHash, at }
 ///                     ALREADY filtered to the trusted set, one per verifier
 ///   trusted           { verifiers: [...], K }
@@ -55,6 +113,7 @@ export function computeVerdict(input) {
     served,
     registryRecord,
     liveModuleHash,
+    livePollModuleHash,
     attestations = [],
     trusted,
     lastSeenModuleHash = null,
@@ -120,49 +179,17 @@ export function computeVerdict(input) {
     }
   }
 
-  // --- 3. the canister doing the serving ----------------------------------
+  // --- 3. the two canisters -----------------------------------------------
+  //
+  // There are two, with different controllers and different powers, and they
+  // must both be checked. The SITE canister serves the ballot page: its
+  // controller can change what the voter sees. The POLL canister holds the
+  // roll, the log and the tally: its controller can change what the ballots
+  // mean. An earlier version of this file checked only the first, which left
+  // "upgrade the canister that counts" entirely unobserved.
 
-  const live = liveModuleHash && !liveModuleHash.error ? liveModuleHash.hash : null;
-
-  if (!live) {
-    c.add(
-      "module-read",
-      "Serving canister's module hash read",
-      UNKNOWN,
-      liveModuleHash?.error ?? "could not read module_hash"
-    );
-  } else if (liveModuleHash.signature?.status !== OK) {
-    // The read succeeded and the value is structurally present, but nothing
-    // has authenticated it. This is the ic-git dependency-1 hole, and it is
-    // the single reason this app cannot currently reach GREEN.
-    c.add(
-      "module-read",
-      "Serving canister's module hash read",
-      UNKNOWN,
-      `${live.slice(0, 16)}... read from an UNAUTHENTICATED certificate: ` +
-        (liveModuleHash.signature?.reason ?? "signature not verified")
-    );
-  } else {
-    c.add("module-read", "Serving canister's module hash read", OK, live);
-  }
-
-  if (live) {
-    if (live === pin.module_sha256) {
-      c.add("module-pin", "Module hash matches the election's pin", OK, live.slice(0, 16) + "...");
-    } else {
-      // THREAT_MODEL.md 2.5: for an election specifically, a module hash that
-      // differs from the one pinned for the window is a spoiling event, not a
-      // notice -- even if the new hash is itself well attested.
-      c.add(
-        "module-pin",
-        "Module hash matches the election's pin",
-        BAD,
-        `live ${live.slice(0, 16)}... but the election pinned ${pin.module_sha256.slice(0, 16)}...`
-      );
-    }
-  } else {
-    c.add("module-pin", "Module hash matches the election's pin", UNKNOWN, "no live hash to compare");
-  }
+  const live = checkCanister(c, "site", "Serving canister", liveModuleHash, pin.module_sha256);
+  checkCanister(c, "poll", "Poll canister", livePollModuleHash, pin.poll_module_sha256);
 
   // --- 4. K-of-N backend attestation --------------------------------------
 

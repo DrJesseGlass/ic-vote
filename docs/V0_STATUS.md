@@ -91,35 +91,73 @@ name. An empty set produces RED, and RED is correct.
    cross-checked against Node's SHA3-256 because Ethereum's keccak has no
    reference implementation in any runtime we ship on.
 
-## The controller is a party, and it is not on the trust list
+## The controller is a party (T7), and there are two of them
 
 Whoever deploys a canister is its controller, and a controller can upgrade it.
-For the poll canister that is the ability to replace the code counting the
-ballots, mid-election. THREAT_MODEL.md's trust table lists the election
-administrator (T6) as trusted "for availability only", which is right for the
-`open_election`/`close_election` role but says nothing about the controller.
+There are **two** canisters here, with different controllers and different
+powers, and an earlier version of this section conflated them:
 
-The controller is not on the trust list because it is *contained* rather than
-trusted: an upgraded canister has a module hash that no longer matches the one
-the election pinned when it opened, so `site/lib/verifier.js` reports RED and
-the ballot is blocked. That containment is the whole reason the pin lives
-inside the manifest hash instead of in a config file.
+- the **site canister** serves the ballot bundle. Its controller can change
+  what the voter sees.
+- the **poll canister** holds the roll, the log and the tally. Its controller
+  can change what the ballots *mean*.
 
-Two consequences worth stating plainly:
+The election's pin now names a module hash for each: `Pin.module_sha256` for
+the site canister and `Pin.poll_module_sha256` for the poll canister, both
+frozen into the manifest hash when the window opens, both compared against a
+certified read by `site/lib/verifier.js`. A mismatch on either is RED and the
+ballot is blocked.
 
-1. The containment is only as good as the module-hash read, and that read is
+**This is a correction, not a description of what was always true.** Until it
+was fixed, the pin carried only the site canister's hash while this document
+claimed it covered the poll canister too. Nothing read the poll canister's
+module hash at all, so a controller could have replaced the ballot-counting
+code mid-election with no change to any verdict a voter saw. It was found by
+review, and it is recorded here rather than quietly patched because a status
+document that hides its own corrections is not worth reading.
+
+What the pin does and does not establish, stated exactly:
+
+- It makes a mid-window **change** visible. That is THREAT_MODEL.md 2.5.
+- It does **not** establish the starting point. The pinned hash is a value the
+  administrator declares; nothing yet proves it was the right one. That is what
+  K-of-N attestation is for, and the trusted verifier set is empty.
+
+Three consequences worth stating plainly:
+
+1. Containment is only as good as the module-hash read, and that read is
    currently capped at UNKNOWN because the certificate is unauthenticated (see
-   above). Until ic-git dependency 1 lands, a controller who upgrades the
-   canister is detectable but not provably so.
-2. Because the controller matters, every script here names its identity
-   explicitly instead of inheriting the ambient `dfx` selection:
-   `tools/check.sh` deploys as `DEPLOY_IDENTITY` (default `icvote-admin`) and
-   prints the resulting controller list, `tools/demo-election.sh` administers
-   as `ADMIN_IDENTITY`, and voters use their own `--identity` per call so
-   nothing mutates the operator's selected identity. This is not tidiness. An
-   early run of these scripts deployed under an ambient identity that nobody
-   had chosen for the purpose, which is exactly how a canister ends up with a
-   controller no one can account for.
+   above). Until ic-git dependency 1 lands, an upgrade is *suspected*, not
+   detected.
+2. **A read that fails is treated more softly than a read that mismatches.** A
+   mismatch is BAD, so RED, so the ballot is blocked. A read that cannot
+   complete at all is UNKNOWN, so YELLOW, which the UI lets a voter click past
+   after an acknowledgement. An attacker who can make the read fail therefore
+   gets a better outcome than one who lets it succeed. Closing this means
+   deciding that an open voting window should hard-block on an unreachable
+   canister, which is a change to the verdict ladder in THREAT_MODEL.md section
+   4 and has not been made.
+3. Because the controller matters, `tools/check.sh` gives the deployer and the
+   administrator **separate** identities: an administrator who can also upgrade
+   the canister is not the "availability only" party T6 describes. The check
+   asserts the resulting controller set for both canisters and fails the run on
+   an unexpected one, rather than printing it and hoping someone reads the
+   scrollback.
+
+Every script under `tools/` passes `--identity` explicitly rather than
+inheriting the ambient `dfx` selection, including `verify-election.mjs`'s
+`dfx canister call` transport, and none of them calls `dfx identity use`, so
+none can mutate the operator's selected identity. An early run of these scripts
+deployed under an ambient identity nobody had chosen for the purpose, which is
+exactly how a canister ends up with a controller no one can account for.
+
+The identities the local checks create are prefixed `icvote-localtest-` and are
+created only when absent. The prefix matters: an earlier version auto-created
+an unencrypted key under a name this document simultaneously recommended for
+real deployments, so a run of the test suite could either mint a plaintext copy
+of a production-sounding key or silently deploy under an operator's real one.
+`tools/check.sh` deploys only to a local replica it wipes; it is not a
+deployment tool.
 
 ## Known rough edges
 

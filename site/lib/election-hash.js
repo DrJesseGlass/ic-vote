@@ -100,6 +100,7 @@ export function manifestHash(m) {
     .text(m.pin.bundle_sha256)
     .text(m.pin.site_canister)
     .text(m.pin.module_sha256)
+    .text(m.pin.poll_module_sha256)
     .u64(m.pin.registry_chain_id)
     .text(m.pin.registry_address)
     .out();

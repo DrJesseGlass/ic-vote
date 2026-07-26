@@ -43,9 +43,28 @@ pub struct Pin {
     pub bundle_sha256: String,
     /// Principal of the ic-git canister serving that bundle.
     pub site_canister: String,
-    /// 64-hex module hash that canister is expected to be running for the
-    /// whole window. A certified read that differs is a spoiling event.
+    /// 64-hex module hash the *site* canister is expected to be running for
+    /// the whole window. A certified read that differs is a spoiling event.
     pub module_sha256: String,
+    /// 64-hex module hash the *poll* canister -- this one, the one holding the
+    /// roll, the log and the tally -- is expected to be running for the whole
+    /// window.
+    ///
+    /// Separate from `module_sha256` because they are different canisters with
+    /// different controllers and different powers. `module_sha256` covers the
+    /// party who can change the ballot *page*; this covers the party who can
+    /// change the code that *counts*. An earlier version of this design had
+    /// only the first and documented it as covering both, which meant a poll
+    /// canister could be upgraded mid-election to code that mis-tallies or
+    /// rewrites the log with no change to any verdict a voter sees.
+    ///
+    /// What this is: a value the administrator declares before the window
+    /// opens, frozen into the manifest hash, that a client compares against a
+    /// certified read. What it is not: proof the declared value was ever the
+    /// right one. It makes a mid-window *change* visible, which is the attack
+    /// in THREAT_MODEL.md 2.5; it does not establish the starting point. That
+    /// is what the K-of-N attestation on the module hash is for.
+    pub poll_module_sha256: String,
     /// EVM chain holding the ProvenanceRegistry for this election.
     pub registry_chain_id: u64,
     /// Registry contract address on that chain.
@@ -80,6 +99,9 @@ impl Pin {
         }
         if !is_lower_hex(&self.module_sha256, 64) {
             return bad("pin.module_sha256 must be 64 lowercase hex chars");
+        }
+        if !is_lower_hex(&self.poll_module_sha256, 64) {
+            return bad("pin.poll_module_sha256 must be 64 lowercase hex chars");
         }
         if Principal::from_text(&self.site_canister).is_err() {
             return bad("pin.site_canister must be a principal");

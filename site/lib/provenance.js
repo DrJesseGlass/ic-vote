@@ -93,12 +93,17 @@ export async function registryAttestation(rpcUrl, registry, canisterText, verifi
   };
 }
 
-/// The certified module hash of the serving canister.
+/// The certified module hash of any canister.
 ///
-/// `verified` is the whole story: the hash is extracted from a real IC
+/// Named for what it does rather than for one caller: it is used for both the
+/// canister serving the bundle and the canister holding the ballots, and an
+/// earlier name (`servingCanisterModuleHash`) is part of why only the first of
+/// those was ever checked.
+///
+/// `signature` is the whole story: the hash is extracted from a real IC
 /// certificate, but nothing has checked that the certificate is genuine. See
 /// certificate.js.
-export async function servingCanisterModuleHash(agent, canisterText) {
+export async function canisterModuleHash(agent, canisterText) {
   const certBytes = await agent.readModuleHash(canisterText);
   const cert = parseCertificate(certBytes);
   const raw = moduleHash(cert, principalToBytes(canisterText));

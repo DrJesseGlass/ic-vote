@@ -174,8 +174,15 @@ async function verifyProvenance() {
       })
     : null;
 
+  // Both canisters, not just the one serving this page. The poll canister is
+  // the one that counts the ballots, so its code is at least as load-bearing
+  // as the page's; reading only the site canister left an upgrade of the
+  // tallying code invisible to every voter.
   const liveModuleHash = pin
-    ? await attempt(() => prov.servingCanisterModuleHash(state.agent, pin.site_canister))
+    ? await attempt(() => prov.canisterModuleHash(state.agent, pin.site_canister))
+    : null;
+  const livePollModuleHash = pin
+    ? await attempt(() => prov.canisterModuleHash(state.agent, state.config.pollCanisterId))
     : null;
 
   const attestations = [];
@@ -194,6 +201,7 @@ async function verifyProvenance() {
     served,
     registryRecord,
     liveModuleHash,
+    livePollModuleHash,
     attestations,
     trusted: state.config.trusted,
     lastSeenModuleHash: localStorage.getItem(LAST_MODULE_HASH_KEY),

@@ -83,6 +83,7 @@ impl Election {
             pin_bundle_sha256: &pin.bundle_sha256,
             pin_site_canister: &pin.site_canister,
             pin_module_sha256: &pin.module_sha256,
+            pin_poll_module_sha256: &pin.poll_module_sha256,
             pin_registry_chain_id: pin.registry_chain_id,
             pin_registry_address: &pin.registry_address,
         }
@@ -443,6 +444,7 @@ mod tests {
             bundle_sha256: "b".repeat(64),
             site_canister: "umobs-yiaaa-aaaab-agyrq-cai".into(),
             module_sha256: "c".repeat(64),
+            poll_module_sha256: "d".repeat(64),
             registry_chain_id: 11155111,
             registry_address: "0xa1362DAda583c56a395D305a8C7A458E0B62A209".into(),
         }
@@ -584,20 +586,50 @@ mod tests {
         );
     }
 
+    /// Every field of the pin must move the manifest hash. A field that is
+    /// stored but not hashed is worse than a missing field: it renders in the
+    /// UI as a commitment while an administrator can change it freely.
     #[test]
-    fn a_different_pin_is_a_different_election() {
-        let (a, ia) = opened();
-        let mut b = Store::default();
-        let ib = b.create(p(1), 100, spec()).unwrap();
-        b.set_roll(p(1), ib, vec![p(11), p(10)]).unwrap();
-        let mut other = pin();
-        other.bundle_sha256 = "d".repeat(64);
-        b.pin_release(p(1), ib, other).unwrap();
-        b.open(p(1), ib, 200).unwrap();
-        assert_ne!(
-            a.election(ia).unwrap().manifest_hash,
-            b.election(ib).unwrap().manifest_hash
-        );
+    fn every_pin_field_is_bound_into_the_manifest() {
+        let baseline = {
+            let (s, id) = opened();
+            s.election(id).unwrap().manifest_hash
+        };
+        let mutations: Vec<(&str, Box<dyn Fn(&mut Pin)>)> = vec![
+            ("repo", Box::new(|p: &mut Pin| p.repo = "other".into())),
+            ("commit", Box::new(|p: &mut Pin| p.commit = "1".repeat(40))),
+            ("bundle_sha256", Box::new(|p: &mut Pin| p.bundle_sha256 = "1".repeat(64))),
+            (
+                "site_canister",
+                Box::new(|p: &mut Pin| p.site_canister = "aaaaa-aa".into()),
+            ),
+            ("module_sha256", Box::new(|p: &mut Pin| p.module_sha256 = "1".repeat(64))),
+            (
+                "poll_module_sha256",
+                Box::new(|p: &mut Pin| p.poll_module_sha256 = "1".repeat(64)),
+            ),
+            ("registry_chain_id", Box::new(|p: &mut Pin| p.registry_chain_id = 100)),
+            (
+                "registry_address",
+                Box::new(|p: &mut Pin| {
+                    p.registry_address = "0x0000000000000000000000000000000000000009".into()
+                }),
+            ),
+        ];
+        for (field, mutate) in mutations {
+            let mut s = Store::default();
+            let id = s.create(p(1), 100, spec()).unwrap();
+            s.set_roll(p(1), id, vec![p(11), p(10)]).unwrap();
+            let mut changed = pin();
+            mutate(&mut changed);
+            s.pin_release(p(1), id, changed).unwrap();
+            s.open(p(1), id, 200).unwrap();
+            assert_ne!(
+                baseline,
+                s.election(id).unwrap().manifest_hash,
+                "changing pin.{field} did not change the manifest hash"
+            );
+        }
     }
 
     #[test]

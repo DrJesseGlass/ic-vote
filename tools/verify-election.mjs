@@ -30,7 +30,7 @@
 // Usage:
 //   node tools/verify-election.mjs --file bulletin.json
 //   node tools/verify-election.mjs --fetch <election-id> [--canister <id>]
-//     [--network local|ic]
+//     [--network local|ic] [--identity <dfx-identity>]
 //
 // --fetch shells out to `dfx` purely as a transport. dfx is not trusted:
 // everything it returns is re-derived here.
@@ -120,6 +120,7 @@ const manifestHash = (m) => {
     .text(m.pin.bundle_sha256)
     .text(m.pin.site_canister)
     .text(m.pin.module_sha256)
+    .text(m.pin.poll_module_sha256)
     .u64(m.pin.registry_chain_id)
     .text(m.pin.registry_address)
     .out();
@@ -347,12 +348,20 @@ function loadFile(path) {
   return JSON.parse(readFileSync(path, "utf8"));
 }
 
-function dfxCall(network, canister, method, arg) {
-  const out = execFileSync(
-    "dfx",
-    ["canister", "call", "--network", network, "--output", "json", canister, method, arg],
-    { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 }
-  );
+/// dfx is a transport here, not a trusted party -- but which identity it signs
+/// with still matters operationally. Left to the ambient selection, these reads
+/// block on a keychain prompt when the operator's identity is encrypted, or
+/// fail outright if it has been removed. Callers pass `--identity`; omitting it
+/// keeps the ambient behaviour for interactive use.
+function dfxCall(opts, canister, method, arg) {
+  const args = ["canister", "call", "--network", opts.network, "--output", "json"];
+  if (opts.identity) args.push("--identity", opts.identity);
+  args.push(canister, method, arg);
+  const out = execFileSync("dfx", args, {
+    encoding: "utf8",
+    maxBuffer: 256 * 1024 * 1024,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
   return JSON.parse(out);
 }
 
@@ -361,15 +370,15 @@ function unwrap(res, what) {
   throw new Error(`${what} failed: ${JSON.stringify(res)}`);
 }
 
-function fetchBulletin(network, canister, id) {
-  const election = unwrap(dfxCall(network, canister, "get_election", `(${id}:nat64)`), "get_election");
-  const manifest = unwrap(dfxCall(network, canister, "get_manifest", `(${id}:nat64)`), "get_manifest");
-  const head = unwrap(dfxCall(network, canister, "certified_head", `(${id}:nat64)`), "certified_head");
+function fetchBulletin(opts, canister, id) {
+  const election = unwrap(dfxCall(opts, canister, "get_election", `(${id}:nat64)`), "get_election");
+  const manifest = unwrap(dfxCall(opts, canister, "get_manifest", `(${id}:nat64)`), "get_manifest");
+  const head = unwrap(dfxCall(opts, canister, "certified_head", `(${id}:nat64)`), "certified_head");
 
   const roll = [];
   for (let off = 0; ; off += 10000) {
     const page = unwrap(
-      dfxCall(network, canister, "get_roll", `(${id}:nat64, ${off}:nat64, 10000:nat64)`),
+      dfxCall(opts, canister, "get_roll", `(${id}:nat64, ${off}:nat64, 10000:nat64)`),
       "get_roll"
     );
     roll.push(...page);
@@ -379,7 +388,7 @@ function fetchBulletin(network, canister, id) {
   const log = [];
   for (let off = 0; ; off += 1000) {
     const page = unwrap(
-      dfxCall(network, canister, "get_log", `(${id}:nat64, ${off}:nat64, 1000:nat64)`),
+      dfxCall(opts, canister, "get_log", `(${id}:nat64, ${off}:nat64, 1000:nat64)`),
       "get_log"
     );
     log.push(...page);
@@ -567,15 +576,15 @@ function main() {
     bulletin = loadFile(file);
   } else if (fetchId !== undefined) {
     const canister = opt("canister", "poll");
-    const network = opt("network", "local");
-    bulletin = fetchBulletin(network, canister, fetchId);
+    const dfxOpts = { network: opt("network", "local"), identity: opt("identity") };
+    bulletin = fetchBulletin(dfxOpts, canister, fetchId);
     if (opt("save")) {
       writeFileSync(opt("save"), JSON.stringify(bulletin, null, 2));
     }
   } else {
     console.error(
       "usage: verify-election.mjs --file <bulletin.json>\n" +
-        "       verify-election.mjs --fetch <election-id> [--canister <id>] [--network local|ic]"
+        "       verify-election.mjs --fetch <election-id> [--canister <id>] [--network local|ic] [--identity <name>]"
     );
     process.exit(2);
   }

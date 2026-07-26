@@ -20,6 +20,7 @@ able to, and any change that adds a row is a design regression.
 | T4 | The eligibility issuer (whoever defines the roll) | Decides who is a voter | No -- this is a political question, not a cryptographic one |
 | T5 | The HTTP gateway, *for non-verifying users only* | Delivers the bundle; can lie to a user who does not check certification | Yes, per-user, by running the verifier |
 | T6 | The election administrator, for *availability* only | Can stop or delay an election | Partially (open bulletin board makes censorship evident) |
+| T7 | The controllers of the poll and site canisters, *bounded by the pin* | A controller can upgrade a canister, replacing the code that counts ballots or the page that collects them | Not removable, but contained: the election pins both module hashes for the window (see 2.5), so a mid-window change is a RED verdict rather than a silent one |
 
 Deliberately **not** on the list, and this is the point of the project:
 
@@ -96,6 +97,20 @@ clamps the verdict to YELLOW pending re-verification. For an election
 specifically, we should additionally **pin the expected module hash for the
 duration of the voting window** and treat any change as a spoiling event
 requiring administrator disclosure.
+
+*Which canisters:* **both**, and this needs saying because the first
+implementation only did one. The canister serving the ballot page and the
+canister holding the ballots are separate, separately controlled, and
+separately able to break the election -- one by changing what the voter sees,
+the other by changing what their vote means. An election pins a module hash for
+each (`Pin.module_sha256`, `Pin.poll_module_sha256`). Pinning only the serving
+canister leaves "upgrade the thing that counts" entirely unobserved, which is
+the state this project shipped in until a review caught it.
+
+*Limit:* the pin makes a *change* visible; it does not establish that the
+pinned value was ever the right one. Only the K-of-N attestation on that hash
+does that, and it is unbuilt (T3, ROADMAP.md dependency 2). A pin whose
+starting value the administrator chose freely is a tripwire, not a proof.
 
 ### 2.6 Eligibility fraud / Sybil
 

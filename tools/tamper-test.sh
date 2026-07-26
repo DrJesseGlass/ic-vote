@@ -13,16 +13,21 @@ set -euo pipefail
 
 ID="${1:-0}"
 NETWORK="${NETWORK:-local}"
+# Named, not ambient, for the same reason as everywhere else in tools/: an
+# encrypted operator identity turns these reads into a keychain prompt that
+# looks exactly like a hang.
+ADMIN="${ADMIN_IDENTITY:-icvote-localtest-admin}"
+OUTSIDER_IDENTITY="${OUTSIDER_IDENTITY:-icvote-localtest-outsider}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-CID="$(dfx canister id --network "$NETWORK" poll)"
+CID="$(dfx canister id --network "$NETWORK" --identity "$ADMIN" poll)"
 node "$HERE/verify-election.mjs" --fetch "$ID" --network "$NETWORK" \
-  --canister "$CID" --save "$WORK/bulletin.json" >/dev/null
+  --identity "$ADMIN" --canister "$CID" --save "$WORK/bulletin.json" >/dev/null
 
 # A principal that is deliberately NOT on the roll.
-OUTSIDER="$(dfx identity get-principal --identity icvote-demo-outsider)"
+OUTSIDER="$(dfx identity get-principal --identity "$OUTSIDER_IDENTITY" </dev/null)"
 
 failures=0
 expect_red() {

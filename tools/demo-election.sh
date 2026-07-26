@@ -17,17 +17,28 @@
 set -euo pipefail
 
 NETWORK="${NETWORK:-local}"
-VOTERS=(icvote-demo-a icvote-demo-b icvote-demo-c)
-OUTSIDER=icvote-demo-outsider
-# A named identity by default, rather than whatever the user has selected: the
-# demo must not depend on -- or implicate -- an unrelated operator identity.
-ADMIN="${ADMIN_IDENTITY:-icvote-admin}"
+VOTERS=(icvote-localtest-a icvote-localtest-b icvote-localtest-c)
+OUTSIDER=icvote-localtest-outsider
+# A throwaway identity by default, rather than whatever the user has selected:
+# the demo must not depend on -- or implicate -- an operator identity. The
+# `icvote-localtest-` prefix is deliberate: a name an operator might plausibly
+# have created for a real deployment must never be one this script auto-creates
+# as an unencrypted key.
+#
+# This is also NOT the deployer. tools/check.sh gives the controller its own
+# identity, because an administrator who can also upgrade the canister is not
+# the "availability only" party THREAT_MODEL.md T6 describes.
+ADMIN="${ADMIN_IDENTITY:-icvote-localtest-admin}"
 
 say() { printf '\n\033[1m== %s\033[0m\n' "$1"; }
 call() { dfx canister call --network "$NETWORK" --identity "$1" poll "${@:2}"; }
 
+# Create only what is missing, so this never writes a plaintext key over -- or
+# silently reuses -- an identity someone else made.
 for who in "$ADMIN" "${VOTERS[@]}" "$OUTSIDER"; do
-  dfx identity new --storage-mode plaintext "$who" </dev/null >/dev/null 2>&1 || true
+  if ! dfx identity get-principal --identity "$who" </dev/null >/dev/null 2>&1; then
+    dfx identity new --storage-mode plaintext "$who" </dev/null >/dev/null 2>&1
+  fi
 done
 
 say "participants"
@@ -70,6 +81,7 @@ call "$ADMIN" pin_release \
       bundle_sha256 = \"$ZERO64\";
       site_canister = \"umobs-yiaaa-aaaab-agyrq-cai\";
       module_sha256 = \"$ZERO64\";
+      poll_module_sha256 = \"$ZERO64\";
       registry_chain_id = 11155111:nat64;
       registry_address = \"0xa1362DAda583c56a395D305a8C7A458E0B62A209\";
    })"
@@ -97,5 +109,10 @@ say "close"
 call "$ADMIN" close_election "($ID:nat64)"
 
 say "independent verification"
+# --identity passed explicitly for the same reason every other call here does:
+# verify-election.mjs shells out to dfx, and without it the reads would be
+# signed by whatever identity the operator happens to have selected -- which
+# can block on a keychain prompt or fail outright if that identity was removed.
 node "$(dirname "$0")/verify-election.mjs" --fetch "$ID" --network "$NETWORK" \
-  --canister "$(dfx canister id --network "$NETWORK" poll)"
+  --identity "$ADMIN" \
+  --canister "$(dfx canister id --network "$NETWORK" --identity "$ADMIN" poll)"

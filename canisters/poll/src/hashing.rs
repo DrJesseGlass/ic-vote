@@ -110,6 +110,7 @@ pub struct ManifestFields<'a> {
     pub pin_bundle_sha256: &'a str,
     pub pin_site_canister: &'a str,
     pub pin_module_sha256: &'a str,
+    pub pin_poll_module_sha256: &'a str,
     pub pin_registry_chain_id: u64,
     pub pin_registry_address: &'a str,
 }
@@ -131,6 +132,7 @@ pub fn manifest_hash(m: &ManifestFields) -> Hash {
         .text(m.pin_bundle_sha256)
         .text(m.pin_site_canister)
         .text(m.pin_module_sha256)
+        .text(m.pin_poll_module_sha256)
         .u64(m.pin_registry_chain_id)
         .text(m.pin_registry_address);
     w.finish()
@@ -301,6 +303,7 @@ mod tests {
                 pin_bundle_sha256: "b",
                 pin_site_canister: "s",
                 pin_module_sha256: "m",
+                pin_poll_module_sha256: "p",
                 pin_registry_chain_id: 1,
                 pin_registry_address: "0x0",
             })
