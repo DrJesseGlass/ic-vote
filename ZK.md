@@ -118,12 +118,51 @@ chain** as ic-git's `compile_lang`. If circuit source goes in on chain and
 R1CS comes out on chain, the compiler row and the compiled-artifact row both
 close, and they close by the same mechanism as everything else in the stack.
 
-Compare the alternative target. Self-hosting a general-purpose language on
-chain -- ic-git's R3 -- is a large multi-year build. A field-arithmetic
-circuit DSL is a plausible one. **If ic-git wants a self-hosting demonstration
-that is real rather than aspirational, circuits are the better first
-language**, and ic-vote is the application that needs it. That is a much more
-concrete version of the R2/R3 story in `ic-git/REPRODUCIBLE_BUILD.md`.
+**Two corrections to how this was first framed here, after reading ic-git's
+Track B.**
+
+First, the on-chain compiler is not a future project. `ic-git/ROADMAP.md`
+records R0-R4 as DONE and verified on a live replica: a real language
+compiler in a canister (lexer, recursive-descent parser, wasm-encoder
+codegen, no LLVM), ~42,000 instructions per function so the binding limit is
+the 10 MiB code section rather than the instruction budget, separate
+compilation across module interfaces with a symbolic-relocation linker, and
+distributed compilation across a worker fleet producing byte-identical output
+to a local build. The infrastructure this argument needs already exists.
+
+Second, and more importantly: **circuits do not give self-hosting, and saying
+so conflated two goals.** A circuit compiler emits a constraint system, not
+wasm, so it can never compile itself. Self-hosting needs the wasm-emitting
+language -- ic-git's R5 path -- and nothing here changes that.
+
+The accurate claim is better than the one it replaces. `compile_lang` has been
+looking for its first real customer; `ic-git/REPRODUCIBLE_BUILD.md` R2 is
+literally "the first app built on ic-git, on-chain, in the project's own DSL."
+**The ZK circuit is that customer, and it is a better one than a generic app,
+because here on-chain compilation is not a demonstration of the pipeline -- it
+is the only thing that closes the compiler row of the table above.** For every
+other application, "compiled on chain" is a nice property. For this one it is
+load-bearing.
+
+The fit is closer than it looks. R1's language is i32 functions over
+`+ - * /` with variables and cross-function calls and no control flow. A
+Semaphore circuit is field arithmetic over `+` and `*`, in named sub-circuits
+that call each other, with no control flow -- Poseidon and a Merkle path are
+*nothing but* that, which is exactly why Poseidon is the hash ZK systems use.
+Swap i32 for a 255-bit field element and swap the wasm-encoder backend for an
+R1CS emitter, and the lexer, parser, module-interface system, relocation
+linker, and fleet distribution all carry over unchanged. Constraint systems
+concatenate more cleanly than wasm function bodies do, and renumbering signal
+indices at link time is the same move the existing linker already makes for
+function indices.
+
+And it escapes the problem that makes R5 open-ended. "R5 and the rustc
+question" concludes, correctly, that this compiler can never match rustc
+exactly, so the wasm language has no natural finish line. **The circuit target
+has no incumbent to match.** A constraint system has to be *sound*, not
+byte-identical to Circom's output, so the rung has an actual completion
+criterion: does it compile the Semaphore circuit to a constraint system that
+accepts exactly the valid witnesses. That is testable and it terminates.
 
 The caveats deserve equal weight:
 
@@ -135,8 +174,21 @@ The caveats deserve equal weight:
 - Soundness bugs in circuit compilers are subtle and vicious -- an
   under-constrained circuit accepts proofs of false statements, and it looks
   fine. Circom and Noir have absorbed years of adversarial attention. A new
-  one has not. Diverse compilation applies here too: compile the same circuit
-  with Circom *and* the DSL and compare the constraint systems.
+  one has not. **Correction to what this document first said:** the fix is
+  not "differential testing on random witnesses." Random witnesses fail the
+  first constraint almost surely, so both systems reject and the agreement
+  rate measures nothing; and differential testing structurally cannot catch
+  under-constraining, because an under-constrained circuit still yields
+  honest outputs on honest inputs. Two compilers can be broken differently
+  and agree on every test. See `ic-git/docs/CIRCUIT_TESTING.md` for the
+  three-axis design that replaces it -- differential testing on random
+  *inputs* and random *circuits* for semantic divergence, a determinism
+  analysis for under-constraining, and structural invariants in CI. The
+  determinism screen (`ic-git/tools/r1cs-check`) needs no compiler and
+  already exists.
+- Field arithmetic is the first non-i32 type this compiler would carry, and
+  signals-versus-constants is a distinction the current language has no
+  notion of. Bounded work, not zero work.
 - None of this is on V1's critical path. V1 should ship with an existing
   toolchain and honest documentation of the unattested rows above.
 
