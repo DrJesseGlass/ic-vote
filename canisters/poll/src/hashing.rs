@@ -26,7 +26,16 @@ pub type Hash = [u8; 32];
 const D_MANIFEST: &[u8] = b"ic-vote/v0/manifest";
 const D_ROLL: &[u8] = b"ic-vote/v0/roll";
 const D_GENESIS: &[u8] = b"ic-vote/v0/log-genesis";
-const D_ENTRY: &[u8] = b"ic-vote/v0/log-entry";
+// "-signed", not the original "log-entry": the entry's field set changed when
+// ballots became self-credentialed (pubkey and signature entered the hash),
+// and a format change under an unchanged domain string is exactly the
+// ambiguity domain separation exists to prevent.
+const D_ENTRY: &[u8] = b"ic-vote/v0/log-entry-signed";
+// Not a hash domain: the prefix of the message a voter's roll key signs.
+// Same length-prefixed framing as every domain above, so no signed ballot
+// message can collide with a hash preimage or with the IC's own
+// "\x0Aic-request" envelope domain (which starts 0x0A; this starts 0x00).
+const D_BALLOT_SIG: &[u8] = b"ic-vote/v0/ballot-sig";
 const D_TALLY: &[u8] = b"ic-vote/v0/tally";
 const D_LEAF: &[u8] = b"ic-vote/v0/merkle-leaf";
 const D_NODE: &[u8] = b"ic-vote/v0/merkle-node";
@@ -150,10 +159,39 @@ pub fn log_genesis(manifest: &Hash) -> Hash {
 /// Append one ballot to the chain. The returned hash is both the new head and
 /// the voter's receipt: it is unforgeable without every preceding entry, so a
 /// voter who keeps it can detect a log that was rewritten behind them.
-pub fn log_append(prev: &Hash, seq: u64, voter: &[u8], choice: u32, at: u64) -> Hash {
+///
+/// The entry hashes the voter's public key and signature, not their principal:
+/// the principal is derivable from the key (sha224(DER) || 0x02), and hashing
+/// the credential means the chain commits to the evidence of eligibility, not
+/// to the canister's claim about who cast the ballot. A canister that swapped
+/// a signature after the fact would break its own chain.
+pub fn log_append(prev: &Hash, seq: u64, pubkey_der: &[u8], choice: u32, at: u64, sig: &[u8]) -> Hash {
     let mut w = HashWriter::new(D_ENTRY);
-    w.hash(prev).u64(seq).bytes(voter).u32(choice).u64(at);
+    w.hash(prev).u64(seq).bytes(pubkey_der).u32(choice).u64(at).bytes(sig);
     w.finish()
+}
+
+/// The exact bytes a voter's roll key signs, and the only bytes it ever signs
+/// under this domain. Binds the ballot to:
+///
+/// - this poll canister (`canister_id`), so an identical election created by
+///   the same administrator on another canister cannot replay it;
+/// - this election instance (`manifest` commits to id, question, options,
+///   roll, and pin), so nothing about the ballot's meaning can drift; and
+/// - the choice itself.
+///
+/// Deliberately NOT hashed before signing: Ed25519 signs the message directly,
+/// and a verifier that reconstructs these bytes needs no agreement about an
+/// intermediate hash.
+pub fn ballot_sig_message(canister_id: &[u8], manifest: &Hash, choice: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4 + D_BALLOT_SIG.len() + 4 + canister_id.len() + 32 + 4);
+    out.extend_from_slice(&(D_BALLOT_SIG.len() as u32).to_be_bytes());
+    out.extend_from_slice(D_BALLOT_SIG);
+    out.extend_from_slice(&(canister_id.len() as u32).to_be_bytes());
+    out.extend_from_slice(canister_id);
+    out.extend_from_slice(manifest);
+    out.extend_from_slice(&choice.to_be_bytes());
+    out
 }
 
 /// The number to checkpoint on-chain at close (ROADMAP.md V0).
@@ -323,16 +361,39 @@ mod tests {
     #[test]
     fn chain_is_order_sensitive() {
         let g = log_genesis(&h(7));
-        let ab = log_append(&log_append(&g, 0, b"a", 0, 1), 1, b"b", 1, 2);
-        let ba = log_append(&log_append(&g, 0, b"b", 1, 2), 1, b"a", 0, 1);
+        let ab = log_append(&log_append(&g, 0, b"a", 0, 1, b"s"), 1, b"b", 1, 2, b"t");
+        let ba = log_append(&log_append(&g, 0, b"b", 1, 2, b"t"), 1, b"a", 0, 1, b"s");
         assert_ne!(ab, ba);
     }
 
     #[test]
     fn chain_is_bound_to_its_manifest() {
         assert_ne!(
-            log_append(&log_genesis(&h(1)), 0, b"a", 0, 1),
-            log_append(&log_genesis(&h(2)), 0, b"a", 0, 1)
+            log_append(&log_genesis(&h(1)), 0, b"a", 0, 1, b"s"),
+            log_append(&log_genesis(&h(2)), 0, b"a", 0, 1, b"s")
+        );
+    }
+
+    #[test]
+    fn chain_commits_to_the_signature() {
+        let g = log_genesis(&h(7));
+        assert_ne!(
+            log_append(&g, 0, b"a", 0, 1, b"sig-one"),
+            log_append(&g, 0, b"a", 0, 1, b"sig-two")
+        );
+    }
+
+    #[test]
+    fn ballot_sig_message_separates_every_field() {
+        let base = ballot_sig_message(b"canister", &h(1), 0);
+        assert_ne!(base, ballot_sig_message(b"canisteq", &h(1), 0));
+        assert_ne!(base, ballot_sig_message(b"canister", &h(2), 0));
+        assert_ne!(base, ballot_sig_message(b"canister", &h(1), 1));
+        // Length prefixing: bytes must not slide between canister id and the
+        // manifest hash.
+        assert_ne!(
+            ballot_sig_message(b"ab", &h(3), 0),
+            ballot_sig_message(b"a", &h(3), 0)
         );
     }
 

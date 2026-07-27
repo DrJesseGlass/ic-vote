@@ -17,7 +17,6 @@ NETWORK="${NETWORK:-local}"
 # encrypted operator identity turns these reads into a keychain prompt that
 # looks exactly like a hang.
 ADMIN="${ADMIN_IDENTITY:-icvote-localtest-admin}"
-OUTSIDER_IDENTITY="${OUTSIDER_IDENTITY:-icvote-localtest-outsider}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -26,8 +25,10 @@ CID="$(dfx canister id --network "$NETWORK" --identity "$ADMIN" poll)"
 node "$HERE/verify-election.mjs" --fetch "$ID" --network "$NETWORK" \
   --identity "$ADMIN" --canister "$CID" --save "$WORK/bulletin.json" >/dev/null
 
-# A principal that is deliberately NOT on the roll.
-OUTSIDER="$(dfx identity get-principal --identity "$OUTSIDER_IDENTITY" </dev/null)"
+# A principal that is deliberately NOT on the roll. Any valid principal that
+# cannot be a voter works; the management canister's is stable and cannot be
+# the sha224-derived principal of any Ed25519 credential.
+OUTSIDER="aaaaa-aa"
 
 failures=0
 expect_red() {
@@ -57,6 +58,9 @@ expect_red "stuff a ballot from a non-member"        "b.log.push({...b.log[0], s
 expect_red "silently drop a ballot"                  "b.log.pop()"
 expect_red "reorder the log"                         "b.log.reverse()"
 expect_red "backdate a ballot's timestamp"           "b.log[0].at = String(BigInt(b.log[0].at) - 1n)"
+expect_red "swap one ballot's signature for another" "b.log[0].sig = b.log[1].sig"
+expect_red "swap one ballot's credential for another" "b.log[0].voter_pubkey = b.log[1].voter_pubkey"
+expect_red "point a ballot at a different voter"     "b.log[0].voter = b.log[1].voter"
 expect_red "enrol a voter after the fact"            "b.roll.push(OUTSIDER)"
 expect_red "drop a voter from the published roll"    "b.roll.pop()"
 expect_red "repoint the election at another bundle"  "b.manifest.pin.bundle_sha256 = 'f'.repeat(64)"

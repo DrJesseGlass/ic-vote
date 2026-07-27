@@ -14,14 +14,22 @@
 //! does not rest on believing this canister.
 //!
 //! Everything in `state.rs` is pure and unit-tested. This file is the thin
-//! shell that supplies `caller`, `time`, and certified data.
+//! shell that supplies environment values -- `caller` for administration,
+//! `time`, the canister's own principal for `cast` -- and certified data.
+//!
+//! `cast` deliberately does NOT read `msg_caller` (THREAT_MODEL.md 2.7):
+//! eligibility rides on an in-ballot Ed25519 credential, and the client
+//! submits from a single-use transport key so the envelope links the ballot
+//! to nobody. In V1 the credential column is replaced by a ZK membership
+//! proof; the transport stays exactly like this.
 
+mod credential;
 mod hashing;
 mod state;
 mod types;
 
 use candid::Principal;
-use ic_cdk::api::{certified_data_set, data_certificate, msg_caller, time};
+use ic_cdk::api::{canister_self, certified_data_set, data_certificate, msg_caller, time};
 use std::cell::RefCell;
 
 use state::Store;
@@ -92,13 +100,28 @@ fn close_election(election_id: u64) -> Result<ElectionView, VoteError> {
 
 // --- voting ---------------------------------------------------------------
 
-/// Cast one ballot. The caller's principal is the signature: the IC has
-/// already authenticated the message envelope, so there is no separate
-/// signature to check or to get wrong.
+/// Cast one ballot, credentialed by an in-ballot signature rather than by the
+/// message envelope.
+///
+/// An earlier version read `msg_caller` here and documented it as "the IC has
+/// already authenticated the envelope". True, and exactly the problem: it
+/// bound every ballot to the transport identity, which V1's encrypted ballots
+/// would have republished as voter-to-choice at close (THREAT_MODEL.md 2.7).
+/// Now the envelope caller is never read -- any caller, including the
+/// anonymous principal, may deliver a ballot -- and eligibility is decided by
+/// `credential::principal_of(voter_pubkey)` against the roll plus a signature
+/// over `hashing::ballot_sig_message(self, manifest, choice)`. The credential
+/// and signature are published in the log, so the franchise check no longer
+/// rests on believing this canister recorded callers honestly.
 #[ic_cdk::update]
-fn cast(election_id: u64, choice: u32) -> Result<Receipt, VoteError> {
-    let (caller, now) = (msg_caller(), time());
-    with_mut(|s| s.cast(caller, election_id, choice, now))
+fn cast(
+    election_id: u64,
+    choice: u32,
+    voter_pubkey: Vec<u8>,
+    sig: Vec<u8>,
+) -> Result<Receipt, VoteError> {
+    let (self_id, now) = (canister_self(), time());
+    with_mut(|s| s.cast(self_id.as_slice(), election_id, choice, voter_pubkey, sig, now))
 }
 
 // --- the public bulletin board -------------------------------------------

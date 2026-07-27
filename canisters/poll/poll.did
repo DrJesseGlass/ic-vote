@@ -1,10 +1,19 @@
 type BallotView = record {
   at : nat64;
   seq : nat64;
+  // 128-hex Ed25519 signature over `hashing::ballot_sig_message`. In the
+  // log so the franchise check is recomputable from published data alone,
+  // rather than resting on this canister's word about who called `cast`.
+  sig : text;
+  // Derived from `voter_pubkey` (sha224(DER) || 0x02), published for
+  // readability. A verifier re-derives it; a `voter` that does not match
+  // the key is a forged board.
   voter : principal;
   // 64-hex chain head after this entry -- the voter's receipt.
   entry_hash : text;
   choice : nat32;
+  // 88-hex DER-encoded Ed25519 public key: the ballot's credential.
+  voter_pubkey : text;
 };
 // A log head plus everything needed to tie it to the canister's certified
 // data without trusting the reply.
@@ -150,6 +159,7 @@ type VoteError = variant {
   InvalidChoice;
   InvalidInput : text;
   NoPin;
+  InvalidSignature;
   NotFound;
   WrongPhase : record { actual : text; expected : text };
   NotAdmin;
@@ -163,10 +173,20 @@ type WitnessStep = record {
   sibling_is_right : bool;
 };
 service : () -> {
-  // Cast one ballot. The caller's principal is the signature: the IC has
-  // already authenticated the message envelope, so there is no separate
-  // signature to check or to get wrong.
-  cast : (nat64, nat32) -> (Result);
+  // Cast one ballot, credentialed by an in-ballot signature rather than by the
+  // message envelope.
+  // 
+  // An earlier version read `msg_caller` here and documented it as "the IC has
+  // already authenticated the envelope". True, and exactly the problem: it
+  // bound every ballot to the transport identity, which V1's encrypted ballots
+  // would have republished as voter-to-choice at close (THREAT_MODEL.md 2.7).
+  // Now the envelope caller is never read -- any caller, including the
+  // anonymous principal, may deliver a ballot -- and eligibility is decided by
+  // `credential::principal_of(voter_pubkey)` against the roll plus a signature
+  // over `hashing::ballot_sig_message(self, manifest, choice)`. The credential
+  // and signature are published in the log, so the franchise check no longer
+  // rests on believing this canister recorded callers honestly.
+  cast : (nat64, nat32, blob, blob) -> (Result);
   // The log head, its Merkle witness, and the IC state certificate.
   // 
   // This is the one read that does not require trusting the replying replica:

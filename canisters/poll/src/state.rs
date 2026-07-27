@@ -9,6 +9,7 @@
 use candid::{CandidType, Principal};
 use serde::Deserialize;
 
+use crate::credential;
 use crate::hashing::{self, Hash, MerkleStep};
 use crate::types::*;
 
@@ -25,9 +26,14 @@ const ZERO: Hash = [0u8; 32];
 #[derive(CandidType, Deserialize, Clone, Debug)]
 pub struct Ballot {
     pub seq: u64,
+    /// Derived from `pubkey_der`, never from the message caller.
     pub voter: Principal,
+    /// The credential: 44-byte DER Ed25519 public key.
+    pub pubkey_der: Vec<u8>,
     pub choice: u32,
     pub at: u64,
+    /// 64-byte Ed25519 signature over `hashing::ballot_sig_message`.
+    pub sig: Vec<u8>,
     pub entry_hash: Hash,
 }
 
@@ -342,17 +348,28 @@ impl Store {
         Ok(e.view())
     }
 
+    /// Cast one ballot. Note what is NOT a parameter: the caller. Eligibility
+    /// rides entirely on the in-ballot credential, so the shell passes the
+    /// canister's own principal (`self_id`, bound into the signed message) and
+    /// nothing about who sent the envelope. That absence is the mechanism of
+    /// THREAT_MODEL.md 2.7: a voter submits from a single-use transport key,
+    /// and this function could not bind the ballot to it even by mistake.
     pub fn cast(
         &mut self,
-        caller: Principal,
+        self_id: &[u8],
         id: u64,
         choice: u32,
+        pubkey_der: Vec<u8>,
+        sig: Vec<u8>,
         now: u64,
     ) -> Result<Receipt, VoteError> {
-        reject_anonymous(caller)?;
         let e = self.get_mut(id)?;
         e.require_phase(Phase::Open)?;
-        if e.roll.binary_search(&caller).is_err() {
+        if choice as usize >= e.options.len() {
+            return Err(VoteError::InvalidChoice);
+        }
+        let voter = credential::principal_of(&pubkey_der)?;
+        if e.roll.binary_search(&voter).is_err() {
             return Err(VoteError::NotEligible);
         }
         // V0 has no re-voting. That is a deliberate omission, not an oversight:
@@ -361,28 +378,32 @@ impl Store {
         // public append-only log leaks the fact that a voter changed their
         // mind under observation -- which is the coercion case it exists to
         // help (THREAT_MODEL.md 3).
-        let pos = match e.voted.binary_search(&caller) {
+        let pos = match e.voted.binary_search(&voter) {
             Ok(_) => return Err(VoteError::AlreadyVoted),
             Err(pos) => pos,
         };
-        if choice as usize >= e.options.len() {
-            return Err(VoteError::InvalidChoice);
-        }
+        // The signature is checked last: it is the expensive step, and every
+        // rejection above is decidable from public data alone.
+        let manifest = e.manifest_hash.as_ref().expect("Open implies a frozen manifest");
+        let message = hashing::ballot_sig_message(self_id, manifest, choice);
+        credential::verify(&pubkey_der, &message, &sig)?;
         let seq = e.log.len() as u64;
-        let entry_hash = hashing::log_append(&e.log_head, seq, caller.as_slice(), choice, now);
+        let entry_hash = hashing::log_append(&e.log_head, seq, &pubkey_der, choice, now, &sig);
         e.log_head = entry_hash;
         e.log.push(Ballot {
             seq,
-            voter: caller,
+            voter,
+            pubkey_der,
             choice,
             at: now,
+            sig,
             entry_hash,
         });
-        e.voted.insert(pos, caller);
+        e.voted.insert(pos, voter);
         Ok(Receipt {
             election_id: id,
             seq,
-            voter: caller,
+            voter,
             choice,
             at: now,
             entry_hash: hex32(&entry_hash),
@@ -402,8 +423,10 @@ impl Store {
             .map(|b| BallotView {
                 seq: b.seq,
                 voter: b.voter,
+                voter_pubkey: hex::encode(&b.pubkey_der),
                 choice: b.choice,
                 at: b.at,
+                sig: hex::encode(&b.sig),
                 entry_hash: hex32(&b.entry_hash),
             })
             .collect())
@@ -424,9 +447,43 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
 
     fn p(n: u8) -> Principal {
         Principal::from_slice(&[n])
+    }
+
+    /// The canister principal the signed message binds to. Any stable bytes
+    /// work: the tests that matter check that a signature bound to one value
+    /// is rejected under another.
+    const SELF_ID: &[u8] = b"test-poll-canister";
+
+    /// A voter is a deterministic Ed25519 keypair; the roll holds the
+    /// principal derived from its DER public key, exactly as production does.
+    fn voter(seed: u8) -> (SigningKey, Vec<u8>, Principal) {
+        let sk = SigningKey::from_bytes(&[seed; 32]);
+        let mut der = crate::credential::DER_PREFIX.to_vec();
+        der.extend_from_slice(sk.verifying_key().as_bytes());
+        let principal = crate::credential::principal_of(&der).unwrap();
+        (sk, der, principal)
+    }
+
+    fn signed(s: &Store, id: u64, seed: u8, choice: u32) -> (Vec<u8>, Vec<u8>) {
+        let (sk, der, _) = voter(seed);
+        // Before open there is no manifest; sign over zeros so the phase
+        // check, which fires first, is what the test exercises.
+        let manifest = s
+            .election(id)
+            .ok()
+            .and_then(|e| e.manifest_hash)
+            .unwrap_or([0u8; 32]);
+        let msg = hashing::ballot_sig_message(SELF_ID, &manifest, choice);
+        (der, sk.sign(&msg).to_bytes().to_vec())
+    }
+
+    fn cast(s: &mut Store, id: u64, seed: u8, choice: u32, at: u64) -> Result<Receipt, VoteError> {
+        let (der, sig) = signed(s, id, seed, choice);
+        s.cast(SELF_ID, id, choice, der, sig, at)
     }
 
     fn spec() -> NewElection {
@@ -450,11 +507,11 @@ mod tests {
         }
     }
 
-    /// Draft election with roll {p(10), p(11)} and a pin, admin = p(1).
+    /// Draft election with voters 10 and 11 enrolled and a pin, admin = p(1).
     fn drafted() -> (Store, u64) {
         let mut s = Store::default();
         let id = s.create(p(1), 100, spec()).unwrap();
-        s.set_roll(p(1), id, vec![p(11), p(10)]).unwrap();
+        s.set_roll(p(1), id, vec![voter(11).2, voter(10).2]).unwrap();
         s.pin_release(p(1), id, pin()).unwrap();
         (s, id)
     }
@@ -468,27 +525,26 @@ mod tests {
     #[test]
     fn happy_path_records_and_tallies() {
         let (mut s, id) = opened();
-        s.cast(p(10), id, 0, 300).unwrap();
-        s.cast(p(11), id, 1, 301).unwrap();
+        cast(&mut s, id, 10, 0, 300).unwrap();
+        cast(&mut s, id, 11, 1, 301).unwrap();
         let t = s.election(id).unwrap().tally();
         assert_eq!(t.counts, vec![1, 1]);
         assert_eq!(t.ballot_count, 2);
         assert!(t.tally_hash.is_some());
+        // The receipt's voter is the principal derived from the credential.
+        let e = s.election(id).unwrap();
+        assert_eq!(e.log[0].voter, voter(10).2);
     }
 
     #[test]
     fn non_member_cannot_vote() {
         let (mut s, id) = opened();
-        assert_eq!(s.cast(p(99), id, 0, 300), Err(VoteError::NotEligible));
+        assert_eq!(cast(&mut s, id, 99, 0, 300), Err(VoteError::NotEligible));
     }
 
     #[test]
-    fn anonymous_cannot_vote_or_create() {
-        let (mut s, id) = opened();
-        assert_eq!(
-            s.cast(Principal::anonymous(), id, 0, 300),
-            Err(VoteError::AnonymousCaller)
-        );
+    fn anonymous_cannot_create() {
+        let mut s = Store::default();
         assert_eq!(
             s.create(Principal::anonymous(), 1, spec()),
             Err(VoteError::AnonymousCaller)
@@ -496,11 +552,57 @@ mod tests {
     }
 
     #[test]
+    fn a_forged_signature_is_rejected_and_leaves_no_trace() {
+        let (mut s, id) = opened();
+        let head = s.election(id).unwrap().log_head;
+        // Voter 11's signature presented with voter 10's key.
+        let (der_10, _) = signed(&s, id, 10, 0);
+        let (_, sig_11) = signed(&s, id, 11, 0);
+        assert_eq!(
+            s.cast(SELF_ID, id, 0, der_10.clone(), sig_11, 300),
+            Err(VoteError::InvalidSignature)
+        );
+        // A signature over a different choice than the one submitted.
+        let (_, sig_other_choice) = signed(&s, id, 10, 1);
+        assert_eq!(
+            s.cast(SELF_ID, id, 0, der_10.clone(), sig_other_choice, 300),
+            Err(VoteError::InvalidSignature)
+        );
+        assert_eq!(s.election(id).unwrap().log_head, head);
+        assert!(s.election(id).unwrap().log.is_empty());
+        // And the failures did not consume the voter's ballot.
+        assert!(cast(&mut s, id, 10, 0, 301).is_ok());
+    }
+
+    #[test]
+    fn a_ballot_does_not_replay_across_elections_or_canisters() {
+        // Two elections identical in every field, on the same canister.
+        let (mut s, id_a) = opened();
+        let id_b = s.create(p(1), 100, spec()).unwrap();
+        s.set_roll(p(1), id_b, vec![voter(11).2, voter(10).2]).unwrap();
+        s.pin_release(p(1), id_b, pin()).unwrap();
+        s.open(p(1), id_b, 900).unwrap();
+
+        let (der, sig) = signed(&s, id_a, 10, 0);
+        // The manifests differ (id, opened_at), so the signature is bound to
+        // election A and must not land in election B.
+        assert_eq!(
+            s.cast(SELF_ID, id_b, 0, der.clone(), sig.clone(), 300),
+            Err(VoteError::InvalidSignature)
+        );
+        // Same election, different canister principal: also rejected.
+        assert_eq!(
+            s.cast(b"another-canister", id_a, 0, der, sig, 300),
+            Err(VoteError::InvalidSignature)
+        );
+    }
+
+    #[test]
     fn double_voting_is_rejected_and_leaves_no_trace() {
         let (mut s, id) = opened();
-        s.cast(p(10), id, 0, 300).unwrap();
+        cast(&mut s, id, 10, 0, 300).unwrap();
         let head_after_first = s.election(id).unwrap().log_head;
-        assert_eq!(s.cast(p(10), id, 1, 301), Err(VoteError::AlreadyVoted));
+        assert_eq!(cast(&mut s, id, 10, 1, 301), Err(VoteError::AlreadyVoted));
         // The rejected attempt must not have advanced the chain.
         assert_eq!(s.election(id).unwrap().log_head, head_after_first);
         assert_eq!(s.election(id).unwrap().log.len(), 1);
@@ -510,24 +612,24 @@ mod tests {
     fn out_of_range_choice_is_rejected_before_the_log_moves() {
         let (mut s, id) = opened();
         let head = s.election(id).unwrap().log_head;
-        assert_eq!(s.cast(p(10), id, 2, 300), Err(VoteError::InvalidChoice));
+        assert_eq!(cast(&mut s, id, 10, 2, 300), Err(VoteError::InvalidChoice));
         assert_eq!(s.election(id).unwrap().log_head, head);
         // and the failed attempt did not consume the voter's one ballot
-        assert!(s.cast(p(10), id, 1, 301).is_ok());
+        assert!(cast(&mut s, id, 10, 1, 301).is_ok());
     }
 
     #[test]
     fn voting_is_confined_to_the_open_phase() {
         let (mut s, id) = drafted();
         assert!(matches!(
-            s.cast(p(10), id, 0, 150),
+            cast(&mut s, id, 10, 0, 150),
             Err(VoteError::WrongPhase { .. })
         ));
         s.open(p(1), id, 200).unwrap();
-        s.cast(p(10), id, 0, 300).unwrap();
+        cast(&mut s, id, 10, 0, 300).unwrap();
         s.close(p(1), id, 400).unwrap();
         assert!(matches!(
-            s.cast(p(11), id, 0, 500),
+            cast(&mut s, id, 11, 0, 500),
             Err(VoteError::WrongPhase { .. })
         ));
     }
@@ -619,7 +721,9 @@ mod tests {
         for (field, mutate) in mutations {
             let mut s = Store::default();
             let id = s.create(p(1), 100, spec()).unwrap();
-            s.set_roll(p(1), id, vec![p(11), p(10)]).unwrap();
+            // Same roll as `drafted()`: if it differed, every assertion below
+            // would pass because of the roll, not the pin field under test.
+            s.set_roll(p(1), id, vec![voter(11).2, voter(10).2]).unwrap();
             let mut changed = pin();
             mutate(&mut changed);
             s.pin_release(p(1), id, changed).unwrap();
@@ -649,26 +753,45 @@ mod tests {
     #[test]
     fn log_chain_is_recomputable_from_the_published_log() {
         let (mut s, id) = opened();
-        s.cast(p(10), id, 0, 300).unwrap();
-        s.cast(p(11), id, 1, 301).unwrap();
+        cast(&mut s, id, 10, 0, 300).unwrap();
+        cast(&mut s, id, 11, 1, 301).unwrap();
         let e = s.election(id).unwrap();
         let mut head = hashing::log_genesis(&e.manifest_hash.unwrap());
         for b in &e.log {
-            head = hashing::log_append(&head, b.seq, b.voter.as_slice(), b.choice, b.at);
+            head = hashing::log_append(&head, b.seq, &b.pubkey_der, b.choice, b.at, &b.sig);
             assert_eq!(head, b.entry_hash);
         }
         assert_eq!(head, e.log_head);
+    }
+
+    /// The franchise is recomputable from the published log alone: derive the
+    /// principal from each entry's public key, verify each signature against
+    /// the manifest. This is what tools/verify-election.mjs check D does, and
+    /// the reason the credential is in the log at all.
+    #[test]
+    fn franchise_is_recomputable_from_the_published_log() {
+        let (mut s, id) = opened();
+        cast(&mut s, id, 10, 0, 300).unwrap();
+        cast(&mut s, id, 11, 1, 301).unwrap();
+        let e = s.election(id).unwrap();
+        let manifest = e.manifest_hash.unwrap();
+        for b in &e.log {
+            assert_eq!(crate::credential::principal_of(&b.pubkey_der).unwrap(), b.voter);
+            assert!(e.roll.binary_search(&b.voter).is_ok());
+            let msg = hashing::ballot_sig_message(SELF_ID, &manifest, b.choice);
+            assert!(crate::credential::verify(&b.pubkey_der, &msg, &b.sig).is_ok());
+        }
     }
 
     #[test]
     fn certified_root_moves_on_every_mutation() {
         let (mut s, id) = opened();
         let r0 = s.certified_root();
-        s.cast(p(10), id, 0, 300).unwrap();
+        cast(&mut s, id, 10, 0, 300).unwrap();
         let r1 = s.certified_root();
         assert_ne!(r0, r1);
         // A rejected ballot must not move it either.
-        assert!(s.cast(p(10), id, 1, 301).is_err());
+        assert!(cast(&mut s, id, 10, 1, 301).is_err());
         assert_eq!(s.certified_root(), r1);
     }
 
@@ -678,12 +801,12 @@ mod tests {
         let mut ids = Vec::new();
         for _ in 0..7 {
             let id = s.create(p(1), 100, spec()).unwrap();
-            s.set_roll(p(1), id, vec![p(10), p(11)]).unwrap();
+            s.set_roll(p(1), id, vec![voter(10).2, voter(11).2]).unwrap();
             s.pin_release(p(1), id, pin()).unwrap();
             s.open(p(1), id, 200).unwrap();
             ids.push(id);
         }
-        s.cast(p(10), ids[3], 1, 300).unwrap();
+        cast(&mut s, ids[3], 10, 1, 300).unwrap();
         let root = s.certified_root();
         for id in ids {
             let e = s.election(id).unwrap();
@@ -702,7 +825,7 @@ mod tests {
     fn tally_hash_tracks_the_result_it_describes() {
         let (mut s, id) = opened();
         let before = s.election(id).unwrap().tally().tally_hash;
-        s.cast(p(10), id, 0, 300).unwrap();
+        cast(&mut s, id, 10, 0, 300).unwrap();
         assert_ne!(before, s.election(id).unwrap().tally().tally_hash);
     }
 

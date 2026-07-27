@@ -112,7 +112,12 @@ async function selectElection(id) {
   // own provenance check. Failing provenance means "do not trust this page to
   // take your vote", not "hide the public record".
   if (manifest) {
-    state.current.board = eh.recomputeBoard({ manifest, roll, log });
+    state.current.board = await eh.recomputeBoard({
+      manifest,
+      roll,
+      log,
+      canisterId: state.config.pollCanisterId,
+    });
     renderBoard();
   }
 
@@ -147,7 +152,9 @@ function describeError(err) {
     case "WrongPhase":
       return `The election is ${value.actual}, not ${value.expected}.`;
     case "AnonymousCaller":
-      return "An anonymous identity cannot vote.";
+      return "An anonymous identity cannot perform this action.";
+    case "InvalidSignature":
+      return "The ballot's signature did not verify. If this page's provenance is GREEN, report it: it means the election this page verified is not the one the canister is running.";
     case "InvalidChoice":
       return "That option does not exist on this ballot.";
     case "InvalidInput":
@@ -394,14 +401,33 @@ async function onCast(event) {
   button.disabled = true;
   button.textContent = "Casting...";
   try {
-    const signing = new Agent({
+    const choice = Number(chosen.value);
+    // The credential signature covers the manifest hash THIS CLIENT computed
+    // (board.manifestHash), not the canister's copy: the voter signs the
+    // election they verified, so a canister lying about the manifest cannot
+    // collect a signature that endorses the lie.
+    const message = eh.ballotSigMessage(
+      state.config.pollCanisterId,
+      state.current.board.manifestHash,
+      choice
+    );
+    const sig = await state.identity.signMessage(message);
+    // The transport identity is generated for this one message and dropped.
+    // The roll identity signs the ballot's contents; nothing about the
+    // envelope may link back to it (THREAT_MODEL.md 2.7). Network and timing
+    // metadata still can, and that residual is the gateway's to see -- not
+    // something this page can remove.
+    const transport = await Ed25519Identity.generate();
+    const submitting = new Agent({
       host: state.config.host,
       canisterId: state.config.pollCanisterId,
-      identity: state.identity,
+      identity: transport,
     });
-    const { value } = await signing.call("cast", [
+    const { value } = await submitting.call("cast", [
       ["nat64", state.current.view.id],
-      ["nat32", Number(chosen.value)],
+      ["nat32", choice],
+      ["blob", state.identity.der],
+      ["blob", sig],
     ]);
     const receipt = unwrap(value);
     $("receipt").classList.remove("hidden");

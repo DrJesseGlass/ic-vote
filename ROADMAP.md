@@ -178,6 +178,16 @@ What V1 is:
 - **Re-voting**: a voter may recast during the window, last ballot counts. It
   interacts with the nullifier and the tally and cannot be bolted on
   afterward. The only coercion mitigation with a track record (Estonia).
+- **Submission is caller-blind, and already is in V0.** A cast is sent from
+  a fresh single-use self-authenticating principal generated in the
+  browser; eligibility rides on what is inside the ballot, and the canister
+  neither checks nor records the caller (THREAT_MODEL.md 2.7, built
+  2026-07-27). In V0 the in-ballot credential is an Ed25519 signature by a
+  roll key; V1 swaps that column for the membership proof and nullifier
+  while the transport stays identical -- an encrypted ballot submitted from
+  a roll-linked principal would be attributable the moment the vetKey opens
+  it. Network and timing metadata remain visible to the gateway and subnet;
+  that residual is THREAT_MODEL.md 2.7, not something the circuit closes.
 - Bulletin board becomes the public record of encrypted ballots plus proofs.
 - **Closed roll only** -- rung 1 of the ladder now in V2. The organization
   supplies the member list; no new trust root is introduced at this rung.

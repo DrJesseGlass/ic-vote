@@ -14,11 +14,11 @@ able to, and any change that adds a row is a design regression.
 
 | # | Trusted | Why it is here | Can we remove it? |
 |---|---|---|---|
-| T1 | The IC subnet (supermajority honest) | Executes the canister, certifies state, holds vetKD shares | No -- it is the platform |
+| T1 | The IC subnet (supermajority honest) | Executes the canister, certifies state, holds vetKD shares; sees every submission's arrival time and ordering (2.7) | No -- it is the platform |
 | T2 | The voter's browser and OS | Sees the plaintext choice before encryption | **No** -- hard floor of remote voting |
 | T3 | K independent build reviewers (not all colluding) | Bridge from certified module hash to auditable source | No, but it amortizes -- one review covers every election |
 | T4 | The eligibility issuer (whoever defines the roll) | Decides who is a voter | No -- this is a political question, not a cryptographic one |
-| T5 | The HTTP gateway, *for non-verifying users only* | Delivers the bundle; can lie to a user who does not check certification | Yes, per-user, by running the verifier |
+| T5 | The HTTP gateway | For *non-verifying users*: delivers the bundle and can lie about it. For **everyone**: sees the source IP and timing of every request, including ballot submissions (2.7) | Integrity: yes, per-user, by running the verifier. Metadata: no |
 | T6 | The election administrator, for *availability* only | Can stop or delay an election | Partially (open bulletin board makes censorship evident) |
 | T7 | The controllers of the poll and site canisters, *bounded by the pin* | A controller can upgrade a canister, replacing the code that counts ballots or the page that collects them | Not removable, but contained: the election pins both module hashes for the window (see 2.5), so a mid-window change is a RED verdict rather than a silent one |
 
@@ -134,6 +134,51 @@ an issuer -- a government, a passport authority, a biometric registry -- and
 choosing one is a political act, not an engineering decision. Internet
 Identity supplies per-origin pseudonyms, which is unlinkability, **not**
 uniqueness. Any claim otherwise is false.
+
+### 2.7 Ballot-submission linkability (V1)
+
+*Attack:* the membership proof unlinks the ballot from the roll, but the
+submission carries identifiers of its own: the ingress message's caller
+principal, the gateway's view of the source IP, and the replica's view of
+arrival time and ordering. At close, the vetKey opens every ciphertext for
+the election at once. Any identifier that survived next to a ciphertext is
+the voter-to-choice link reconstituted -- the ZK circuit removed the
+cryptographic link, not the transport's.
+
+*Mitigation (mechanism, built at V0):* a cast is submitted from a
+single-use self-authenticating principal generated in the browser for that
+one message -- never the voter's Internet Identity or any roll-linked
+principal. Eligibility rides entirely on an in-ballot credential, so the
+canister accepts a cast from any caller, never reads `msg_caller` in the
+cast path, and stores nothing caller-derived (`state.rs::cast` does not
+even take a caller parameter). V0's original design was the opposite --
+the caller principal *was* the ballot signature -- and it was replaced
+rather than kept until V1, for two reasons. First, the transport must
+already be caller-blind when V1's encryption arrives, or every "encrypted"
+ballot is attributable the moment the vetKey opens (2.3). Second, the V0
+replacement is itself an upgrade to the public board: the credential (an
+Ed25519 key on the roll) and its signature over (poll canister, manifest
+hash, choice) are published in the log and bound into the entry hash, so
+the franchise check is recomputable from published data instead of resting
+on this canister's word about who called `cast`. In V1 the credential
+column becomes a ZK membership proof and a nullifier; the transport does
+not change.
+
+*Residual (not absorbed by "we have ZK"):* the gateway sees source IP and
+timing for every submission -- T5's trust scope for metadata covers all
+users, not only non-verifying ones -- and the replicas see arrival order
+(T1). An observer holding those logs can correlate ciphertexts to network
+identities regardless of the circuit. This project cannot remove that.
+User-level mitigations (submitting over Tor or a VPN) are real but are the
+voter's to perform, and client-side submit-time jitter blunts only coarse
+correlation, not the infrastructure's own logs. Per the rule at the top of
+this document: the circuit closes the cryptographic link and is described
+as closing exactly that.
+
+*Re-voting disclosure:* recasts reuse the nullifier, so the public record
+shows that *some* anonymous member revoted and how many times, without
+identifying them. This is inherent to last-ballot-counts (section 3) and is
+stated rather than hidden.
 
 ## 3. Coercion resistance, stated honestly
 

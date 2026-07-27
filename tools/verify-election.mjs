@@ -12,7 +12,9 @@
 //   A. roll_hash  -- the published roll hashes to what the manifest commits to
 //   B. manifest   -- manifest_hash is what its own published fields produce
 //   C. chain      -- every log entry_hash chains from genesis; head matches
-//   D. franchise  -- every ballot is from a roll member, once, in range
+//   D. franchise  -- every ballot's key derives a roll member, once, in
+//                    range, with a valid signature over (canister, manifest,
+//                    choice)
 //   E. tally      -- counts recomputed from the log, and tally_hash over them
 //   F. inclusion  -- the election's Merkle leaf + witness reproduce a root
 //   G. certified  -- that root is the certified_data inside the IC certificate
@@ -35,7 +37,7 @@
 // --fetch shells out to `dfx` purely as a transport. dfx is not trusted:
 // everything it returns is re-derived here.
 
-import { createHash } from "node:crypto";
+import { createHash, createPublicKey, verify as ed25519Verify } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 
@@ -46,7 +48,9 @@ import { readFileSync, writeFileSync } from "node:fs";
 const D_MANIFEST = "ic-vote/v0/manifest";
 const D_ROLL = "ic-vote/v0/roll";
 const D_GENESIS = "ic-vote/v0/log-genesis";
-const D_ENTRY = "ic-vote/v0/log-entry";
+// "-signed": see the note on D_ENTRY in canisters/poll/src/hashing.rs.
+const D_ENTRY = "ic-vote/v0/log-entry-signed";
+const D_BALLOT_SIG = "ic-vote/v0/ballot-sig";
 const D_TALLY = "ic-vote/v0/tally";
 const D_LEAF = "ic-vote/v0/merkle-leaf";
 const D_NODE = "ic-vote/v0/merkle-node";
@@ -128,8 +132,44 @@ const manifestHash = (m) => {
 
 const logGenesis = (manifest) => new W(D_GENESIS).h(manifest).out();
 
-const logAppend = (prev, seq, voterBytes, choice, at) =>
-  new W(D_ENTRY).h(prev).u64(seq).lp(voterBytes).u32(choice).u64(at).out();
+const logAppend = (prev, seq, pubkeyDer, choice, at, sig) =>
+  new W(D_ENTRY).h(prev).u64(seq).lp(pubkeyDer).u32(choice).u64(at).lp(sig).out();
+
+// --------------------------------------------------------------------------
+// the ballot credential -- mirrors canisters/poll/src/credential.rs
+// --------------------------------------------------------------------------
+
+/// The one DER spelling of an Ed25519 SPKI key the canister accepts.
+const DER_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
+
+/// Self-authenticating principal: sha224(DER) || 0x02, the IC's own rule.
+const principalOfKey = (pubkeyDer) =>
+  Buffer.concat([createHash("sha224").update(pubkeyDer).digest(), Buffer.from([0x02])]);
+
+/// The exact bytes the roll key signed: length-prefixed domain, length-
+/// prefixed poll canister principal, manifest hash, u32be choice.
+function ballotSigMessage(canisterBytes, manifestHex, choice) {
+  const domain = Buffer.from(D_BALLOT_SIG, "utf8");
+  return Buffer.concat([
+    u32be(domain.length), domain,
+    u32be(canisterBytes.length), canisterBytes,
+    Buffer.from(manifestHex, "hex"),
+    u32be(choice),
+  ]);
+}
+
+/// Node's Ed25519 accepts the SPKI DER directly. Its check is laxer than the
+/// canister's verify_strict, so everything the canister accepted verifies
+/// here; the reverse direction never matters because this tool only reads
+/// logs the canister built.
+function sigVerifies(pubkeyDer, message, sig) {
+  try {
+    const key = createPublicKey({ key: pubkeyDer, format: "der", type: "spki" });
+    return ed25519Verify(null, message, key, sig);
+  } catch {
+    return false;
+  }
+}
 
 const tallyHash = (manifest, head, counts) => {
   const w = new W(D_TALLY).h(manifest).h(head).u32(counts.length);
@@ -449,7 +489,8 @@ function verify(b) {
 
   // C -- the chain. Recomputed from OUR manifest hash, not the canister's, so
   // a canister that lies about the manifest cannot also hand us a chain that
-  // validates against the lie.
+  // validates against the lie. The chain covers each ballot's credential and
+  // signature, so none of them can have been swapped after the fact.
   let head = logGenesis(mh);
   let chainOk = true;
   b.log.forEach((entry, idx) => {
@@ -461,9 +502,10 @@ function verify(b) {
     head = logAppend(
       head,
       seq,
-      principalToBytes(entry.voter),
+      Buffer.from(entry.voter_pubkey, "hex"),
       Number(entry.choice),
-      u64(entry.at, `log[${idx}].at`)
+      u64(entry.at, `log[${idx}].at`),
+      Buffer.from(entry.sig, "hex")
     );
     if (head !== entry.entry_hash) {
       fail("C. chain", `entry ${idx} hash ${entry.entry_hash} != recomputed ${head}`);
@@ -475,19 +517,35 @@ function verify(b) {
     ? pass("C. head", head)
     : fail("C. head", `recomputed ${head}, canister says ${b.certified_head.log_head}`);
 
-  // D -- franchise. Every ballot from a roll member, at most one each,
-  // choice in range.
+  // D -- franchise, derived entirely from published credentials. For every
+  // ballot: the key is well-formed, the principal DERIVED from it (never the
+  // one the canister printed) is on the roll and voted once, the choice is in
+  // range, and the signature verifies over (this canister, our manifest hash,
+  // the recorded choice). This is the check that used to be impossible: the
+  // old log recorded callers, and only the canister ever saw those.
+  const canisterBytes = principalToBytes(b.canister);
   const rollSet = new Set(asGiven);
   const seen = new Set();
   let franchiseOk = true;
-  for (const entry of b.log) {
-    const v = principalToBytes(entry.voter).toString("hex");
+  b.log.forEach((entry, idx) => {
+    const pubkeyDer = Buffer.from(entry.voter_pubkey, "hex");
+    if (pubkeyDer.length !== 44 || !pubkeyDer.subarray(0, 12).equals(DER_PREFIX)) {
+      fail("D. franchise", `ballot ${idx} carries a malformed Ed25519 credential`);
+      franchiseOk = false;
+      return;
+    }
+    const derived = principalOfKey(pubkeyDer);
+    const v = derived.toString("hex");
+    if (!derived.equals(principalToBytes(entry.voter))) {
+      fail("D. franchise", `ballot ${idx} names ${entry.voter}, but its key derives another principal`);
+      franchiseOk = false;
+    }
     if (!rollSet.has(v)) {
-      fail("D. franchise", `ballot from ${entry.voter}, who is not on the roll`);
+      fail("D. franchise", `ballot ${idx} is from a key not on the roll`);
       franchiseOk = false;
     }
     if (seen.has(v)) {
-      fail("D. franchise", `${entry.voter} appears more than once in the log`);
+      fail("D. franchise", `the key behind ballot ${idx} appears more than once in the log`);
       franchiseOk = false;
     }
     seen.add(v);
@@ -495,8 +553,13 @@ function verify(b) {
       fail("D. franchise", `choice ${entry.choice} is outside 0..${m.options.length - 1}`);
       franchiseOk = false;
     }
-  }
-  if (franchiseOk) pass("D. franchise", `${b.log.length} of ${b.roll.length} eligible voted`);
+    const msg = ballotSigMessage(canisterBytes, mh, Number(entry.choice));
+    if (!sigVerifies(pubkeyDer, msg, Buffer.from(entry.sig, "hex"))) {
+      fail("D. franchise", `ballot ${idx} has an invalid signature`);
+      franchiseOk = false;
+    }
+  });
+  if (franchiseOk) pass("D. franchise", `${b.log.length} of ${b.roll.length} eligible voted, all signatures verify`);
 
   // E -- the tally, recomputed. This is the number that matters; the
   // canister's get_tally is not consulted.

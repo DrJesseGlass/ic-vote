@@ -111,15 +111,32 @@ export class Ed25519Identity {
     const privateKey = await crypto.subtle.importKey("pkcs8", pkcs8, { name: "Ed25519" }, true, [
       "sign",
     ]);
-    // WebCrypto will not hand back the public key from a private one, so it is
-    // recovered from the pkcs8 structure: the last 32 bytes of an Ed25519
-    // pkcs8 v2 blob are the public key.
-    const raw = pkcs8.slice(pkcs8.length - 32);
+    // Recovering the public key needs care: WebCrypto exports Ed25519 as
+    // pkcs8 v1, which contains ONLY the private seed -- an earlier version
+    // read "the last 32 bytes" and got the seed, so every reloaded identity
+    // silently became a different principal. The JWK view of the same private
+    // key does carry the public half (its `x` parameter, base64url), in both
+    // browsers and Node.
+    const jwk = await crypto.subtle.exportKey("jwk", privateKey);
+    const b64 = jwk.x.replace(/-/g, "+").replace(/_/g, "/");
+    const raw = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
     return new Ed25519Identity({ privateKey }, derEncodeEd25519(raw));
   }
 
   async exportPkcs8() {
     return new Uint8Array(await crypto.subtle.exportKey("pkcs8", this.keyPair.privateKey));
+  }
+
+  /// Sign arbitrary bytes -- used for the in-ballot credential signature
+  /// (election-hash.js ballotSigMessage). Safe next to `transform` because
+  /// the two domains cannot collide: an ic-request signature covers bytes
+  /// beginning 0x0A "ic-request", a ballot signature covers bytes beginning
+  /// with a u32be length (0x00...), so no signature made here can be replayed
+  /// as an ingress envelope or vice versa.
+  async signMessage(bytes) {
+    return new Uint8Array(
+      await crypto.subtle.sign({ name: "Ed25519" }, this.keyPair.privateKey, bytes)
+    );
   }
 
   async transform(content) {

@@ -120,6 +120,53 @@ exactly the thing they were avoiding. Three routes:
   comparison and ranking proofs over ciphertexts. The interesting research
   direction; not a first version.
 
+**(C) decomposes, and the cheap half is the half Vickrey needs (added
+2026-07-27).** The mechanism never uses the winner's valuation: the price
+paid is the second bid. Full disclosure (A) therefore publishes the one
+number the mechanism was designed never to charge -- the winner's true
+valuation -- which is Rothkopf's other reason at maximum strength, aimed at
+the party who least deserves it. But hiding *only* the winner's bid is far
+cheaper than hiding everything:
+
+- **What verifiability actually requires:** the second price, plus evidence
+  that exactly one committed bid exceeds it. The losing bids *can* be
+  public -- publishing them is what establishes the second price by
+  inspection. Only the maximum needs concealing.
+- **Construction:** per-bid IBE identities (`auction_id || bid_id`), not
+  one auction identity. vetKD opening is all-or-nothing per identity
+  (ROADMAP.md, "why the rungs merged", finding 1 territory), so a single
+  auction identity cannot hold one bid back. At close the canister derives
+  every bid key internally, finds the maximum, and publishes the derived
+  keys for every bid *except* the winner's. The winner -- who must step
+  forward to pay anyway -- publishes a proof that their still-sealed bid
+  exceeds the published second price. A comparison against a public value
+  over one commitment is range-proof territory (Bulletproofs-shaped: no
+  trusted setup, no membership circuit, prover is the winner's browser).
+- **Why it is sound:** exactly one ciphertext stays unopened. If the
+  canister mislabels the winner, the designated winner cannot produce the
+  proof, because their bid does not exceed the true maximum sitting in the
+  opened set. Failure to produce the proof within a deadline forfeits the
+  deposit and the next-highest bid wins a re-run of the same procedure.
+  Ties need an explicit published rule; pick one before the first auction,
+  not during it.
+- **Honest limits:** the subnet sees every plaintext at close (T1) -- this
+  hides the winner's valuation from the *public record*, not from the
+  platform. Losing bids are still published, so for repeat-procurement
+  deployments combine with (B) so they are at least unattributed. And the
+  close now makes N derivation calls instead of one, so the cost scales
+  with bid count -- trivial at the sizes in section 4, but no longer a
+  constant.
+- **Why the voting machinery does not transfer here:** the deferred voting
+  alternative (ROADMAP.md V1, homomorphic tally) sums ciphertexts, and a
+  Vickrey close needs order statistics -- max and second-max -- which are
+  not sums. Additive homomorphism buys nothing for an auction. This
+  decomposition, not Helios, is the auction-shaped answer to "never open
+  the sensitive value."
+
+Full (C) -- clearing price only, nothing else revealed, hidden even from
+the subnet -- remains the research direction it was. The decomposition
+above is buildable with the stack this repo already plans.
+
 **The close is the fragile moment, again.** `vetkd_derive_key` is a
 cross-subnet call that can exceed the replica's 10s synchronous window
 (ROADMAP.md, footgun 2). An auction close is *more* timing-sensitive than an
@@ -156,7 +203,10 @@ the real product, and it is a strictly smaller build than ic-vote V1 because
 it needs no anonymity.
 
 **A2 -- bidder privacy.** Option (B) or (C) from section 5, chosen per
-deployment. (B) is nearly free once ic-vote V1 exists.
+deployment. (B) is nearly free once ic-vote V1 exists. For (C), build the
+hidden-winner decomposition (section 5), not the full ZK second-price: it
+is the half Vickrey actually needs, and it needs a range proof, not a
+circuit.
 
 ## 7. What DFINITY's timelock example actually does
 
