@@ -1,8 +1,14 @@
 # Roadmap: V0 to V3
 
 Each rung ships and demos on its own. The ordering is deliberate and inverting
-it is how these projects die: **verifiable client, then secrecy, then
-anonymity, then coercion mitigation.**
+it is how these projects die: **verifiable client, then the secret ballot
+(secrecy and anonymity together), then wider eligibility, then coercion
+mitigation.**
+
+*Revised 2026-07-26: secrecy and anonymity were separate rungs until the vetKD
+re-check showed that the first does not deliver a secret ballot without the
+second. What was V2's mechanism is now in V1; V2 is now the eligibility
+ladder. See "Why the rungs merged" below.*
 
 The reason for that order: client verifiability is the thing we uniquely have
 (VISION.md section 3), and every later rung's cryptography is worthless
@@ -69,6 +75,25 @@ need to design around a test key. Re-verified 2026-07-26; details below.
   trusts a public key handed to it by an unattested canister has no secrecy.
   The verifier gate (V0) is a prerequisite for V1's secrecy, not just a nice
   ordering.
+- **...but the derived public key can be checked offline, and must be.**
+  Verified by reading `dfinity/vetkeys` on 2026-07-26. Key derivation is
+  public: the mainnet master public key for `key_1` is a fixed 96-byte
+  compressed BLS12-381 G2 point hardcoded in the library, and
+
+  ```ts
+  MasterPublicKey.productionKey(MasterPublicKeyId.KEY_1)
+      .deriveCanisterKey(canisterIdBytes)
+      .deriveSubKey(contextBytes)
+  ```
+
+  reproduces any canister's derived public key with no IC interaction at all.
+  (Rust parity: `MasterPublicKey::for_mainnet_key` / `derive_canister_key` /
+  `derive_sub_key`.) This matters because a client that accepts whatever
+  public key the canister hands it can be given a key the operator holds the
+  secret for, encrypt every ballot to it, and notice nothing -- the ballots
+  still "work". **The client must pin the master key and recompute.** Same
+  discipline as ic-git's pinned NNS root key, same reason. DFINITY's own
+  example does not do this (see below).
 - **Footgun 1, wrong key id.** Shipping a test key to mainnet is a silent,
   total loss of ballot secrecy -- no error, no warning, just no security. Same
   class as the `CARGO_NET_LOCKED` no-op ic-git caught in
@@ -127,27 +152,37 @@ That is a real deployable use case, not a toy.
 **Dogfooding:** the first real election run on V0 should be a decision about
 ic-git itself.
 
-## V1 -- ballot secrecy
+## V1 -- the secret ballot: encryption and anonymity in one rung
 
-- Ballots encrypted client-side under a vetKD-derived key; the canister never
-  holds plaintext or a decryption key.
-- Threshold decrypt at close, or homomorphic tally without ever decrypting
-  individual ballots (preferred where the ballot type allows it -- it removes
-  an entire class of "who decrypted early" concern).
-- **Re-voting support lands here**, not later: a voter may recast during the
-  window, last ballot counts. It interacts with the tally and nullifier design
-  and cannot be bolted on afterward. This is the only coercion mitigation with
-  a track record (Estonia).
+**This rung absorbed what used to be V2.** The original ordering -- secrecy at
+V1, anonymity at V2 -- rested on the premise that encryption alone buys a
+secret ballot. It does not. Encrypting a ballot that is still signed by a
+roll-listed identity buys *secrecy until close*, after which every ballot is
+decrypted next to the identity that submitted it. Anonymity is not a
+refinement you add later; without it the earlier rung does not deliver the
+thing it is named after. So they ship together or neither ships.
+
+What V1 is:
+
+- Ballots encrypted client-side to a vetKD IBE identity for the election; the
+  canister never holds plaintext or a decryption key.
+- Roll published as a Merkle root. The voter proves in zero knowledge: "I know
+  a leaf in this root, and here is a nullifier derived from my key and this
+  election id." Semaphore-shaped.
+- The nullifier makes a second ballot from the same member detectable without
+  linking either ballot to that member. It is also what makes re-voting
+  expressible at all, which is why re-voting cannot precede it.
+- Groth16 verification in a canister is cheap; proving runs client-side in
+  wasm. **The prover is a bundle too** -- it goes in the same attested
+  frontend, or the anonymity guarantee has an unverified component.
+- **Re-voting**: a voter may recast during the window, last ballot counts. It
+  interacts with the nullifier and the tally and cannot be bolted on
+  afterward. The only coercion mitigation with a track record (Estonia).
 - Bulletin board becomes the public record of encrypted ballots plus proofs.
+- **Closed roll only** -- rung 1 of the ladder now in V2. The organization
+  supplies the member list; no new trust root is introduced at this rung.
 
-Open design question: homomorphic vs. mixnet. Homomorphic is simpler and
-sufficient for yes/no and single-choice-from-small-slate; mixnets are needed
-for ranked or write-in ballots. Start homomorphic and be explicit that ballot
-types are restricted.
-
-**Correction surfaced by the 2026-07-26 vetKD check -- read before designing
-V1.** The two bullets above are in tension, and the ordering of V1 before V2
-partly rests on the tension not existing.
+### Why the rungs merged (findings from the 2026-07-26 vetKD check)
 
 1. **vetKD's IBE does not give you a homomorphic tally.** What the shipped
    libraries provide is: encrypt to an identity, derive that identity's key at
@@ -157,59 +192,93 @@ partly rests on the tension not existing.
    drop-in substitute for it. "Use vetKD" and "tally homomorphically" are two
    different projects, and only the first is a solved integration.
 2. **Decrypt-at-close plus V0's signed ballots is not a secret ballot.** V0
-   ballots are signed by roll-listed identities. If V1 keeps that and merely
-   encrypts the payload, then at close every ballot is decrypted next to the
-   identity that submitted it, and the voter-to-choice link is public the
-   moment the election ends. That is *secrecy during voting* -- real, and
-   worth something against a live subnet observer or early-tally pressure --
-   but it is not what "ballot secrecy" means to a voter.
+   ballots are signed by roll-listed identities. If V1 kept that and merely
+   encrypted the payload, the voter-to-choice link would be public the moment
+   the election ends. That is *secrecy during voting* -- real, and worth
+   something against a live subnet observer or early-tally pressure -- but it
+   is not what "ballot secrecy" means to a voter.
 
-Which means V1 has to pick one of three, explicitly:
+Confirm finding 1 against `dfinity/vetkeys` directly before committing code to
+it; it is reasoning about the primitive's shape, not a quoted source.
 
-- **(a) Secrecy-until-close, stated honestly.** vetKD IBE, ballots still
-  attributable at close. Cheap, shippable, and adequate for votes that are
-  already public -- but then it adds little over V0 and should be labeled as
-  what it is, not as ballot secrecy.
-- **(b) Merge V2 forward.** Anonymous credentials (nullifier) *before* or
-  *with* encryption, so decrypt-at-close reveals choices detached from
-  identities. This is the honest route to a secret ballot and it makes V1 and
-  V2 one rung.
-- **(c) Homomorphic tally, never decrypt individual ballots.** Threshold
-  exponential ElGamal, vetKD guarding the trustee key. Preserves the V1/V2
-  split but is the largest crypto build of the three and restricts ballot
-  types hard.
+Two alternatives were considered:
 
-Recommendation: (b). The roadmap's ordering premise -- secrecy is a smaller
-step than anonymity -- does not survive contact with what decrypt-at-close
-actually reveals. Confirm the homomorphic claim in 1 against
-`dfinity/vetkeys` directly before committing; it is reasoning about the
-primitive's shape, not a quoted source.
+- **Secrecy-until-close, labeled honestly.** vetKD IBE, ballots still
+  attributable at close. Cheap and shippable, but it adds little over V0 and
+  would have to be advertised as something other than a secret ballot.
+  Rejected as a rung; it is a legitimate *product* for already-public votes,
+  and V0 already covers those.
+- **Homomorphic tally, never decrypting individual ballots.** Threshold
+  exponential ElGamal with vetKD guarding the trustee key. Deferred, not
+  rejected on merit: it is the largest crypto build of the three and
+  restricts ballot types hardest, but it is the only route that avoids the
+  mixnet question entirely, and it is the right answer for a deployment that
+  needs a tally with no individual decryption at all. Revisit at V2+.
 
-**Upgrade control becomes load-bearing at V1.** The subnet will derive the
-election key for whoever the poll canister asks it to. A controller who can
-upgrade the canister can therefore add a "derive now" path and read every
-ballot before close, and no amount of client attestation sees it. This is
-exactly REPRODUCIBLE_BUILD.md's temporal-trust residual, arriving with teeth:
-before any election with real secrecy claims, the poll canister's upgrade
-path must be under governance or blackholed, and the verifier should surface
-the controller set alongside the module hash.
+### Tally shape, and why ranked ballots are not a free extension
 
-## V2 -- anonymous but eligible
+Homomorphic tallying is simple and sufficient for yes/no and
+single-choice-from-a-small-slate, because the tally is a sum and sums are what
+additively homomorphic ciphertexts give you. Ranked and write-in ballots are a
+different problem in two ways, and only the first is widely noted.
 
-- Roll published as a Merkle root.
-- Voter proves in zero knowledge: "I know a leaf in this root, and here is a
-  nullifier derived from my key and this election id." Semaphore-shaped.
-- Nullifier makes a second ballot from the same member detectable without
-  linking either ballot to that member.
-- Groth16 verification in a canister is cheap; proving runs client-side in
-  wasm. **The prover is a bundle too** -- it goes in the same attested
-  frontend, or the anonymity guarantee has an unverified component.
+**IRV/STV is not a sum.** It is iterative, data-dependent elimination: which
+ballots transfer in round 3 depends on what happened in rounds 1 and 2. There
+is no practical homomorphic evaluation of that. Ranked ballots therefore force
+a verifiable mixnet -- shuffle the encrypted ballots with a proof of correct
+shuffle, decrypt the shuffled set, tally in the open.
+
+**A full ranking is a fingerprint, and this is the one that bites.** A ranking
+over N candidates carries log2(N!) bits -- about 22 at N=10. The mixnet route
+*requires* publishing the decrypted individual ballots, since that is what
+makes the tally publicly recomputable. So a coercer instructs the voter to
+rank their low preferences in a specified unusual order and then looks for
+that exact permutation in the published set: the **Italian attack**. Note what
+is and is not broken. The mixnet is sound, the nullifier is sound, V1's
+anonymity is sound. The ballot itself is the receipt.
+
+Mitigations, both costly:
+
+- **Cap the ranking depth** -- rank at most 3 of N. At N=10 that is 720
+  distinct patterns instead of 3,628,800. But the defense is *statistical*
+  and depends on electorate size: 5,000 voters over 720 patterns averages
+  about 7 ballots per pattern and a specified pattern identifies nobody,
+  while a 300-member co-op averages 0.4 and the attack works exactly as well
+  as before. **Our target market is the small end**, which is precisely where
+  the cap is weakest. Any cap must be sized against the actual electorate and
+  the sizing published, not chosen once and reused.
+- **Publish round-by-round tallies instead of ballots.** Removes the
+  fingerprint and removes public recomputability with it, which puts you back
+  to trusting the tally process -- the thing this project exists to avoid.
+
+The honest position: ic-vote should ship single-choice first and treat ranked
+ballots as a distinct rung with its own threat analysis, not as a ballot-type
+checkbox. If an organization needs RCV, capped depth plus a published sizing
+argument is the deployable answer, and the residual risk belongs in writing.
+
+### Upgrade control becomes load-bearing at V1
+
+The subnet will derive the election key for whoever the poll canister asks it
+to. A controller who can upgrade the canister can therefore add a "derive now"
+path and read every ballot before close, and no amount of client attestation
+sees it. This is exactly REPRODUCIBLE_BUILD.md's temporal-trust residual,
+arriving with teeth: before any election with real secrecy claims, the poll
+canister's upgrade path must be under governance or blackholed, and the
+verifier should surface the controller set alongside the module hash.
+
+## V2 -- eligibility beyond the closed roll
+
+V1 ships rung 1 and only rung 1. This rung is about who else can issue the
+credential, and it is the genuinely unsolved item in this document -- unsolved
+as a *trust* question, not a mathematical one. Somebody must vouch that a
+person exists and gets one vote, and who that somebody is, is politics.
 
 **Eligibility issuance ladder** (T4 in the threat model; pick per deployment,
 do not pretend one is universal):
 
-1. **Closed roll** -- organization supplies the member list. V0/V2 default.
-   Honest, sufficient for the target market, no new trust root.
+1. **Closed roll** -- organization supplies the member list. Shipped at V0,
+   carried into V1 as a Merkle root. Honest, sufficient for the target
+   market, no new trust root.
 2. **Government eID** -- EUDI wallet credentials, BBS+ selective disclosure.
    Real, deployed, jurisdiction-bound.
 3. **Passport NFC** -- ZK proof over the ICAO 9303 passive-authentication
@@ -219,6 +288,11 @@ do not pretend one is universal):
 
 Internet Identity is **not** on this ladder: it gives per-origin pseudonyms,
 which is unlinkability, not uniqueness.
+
+Note that rungs 2 and 3 change *nothing* about V1's mechanism. The Merkle
+root, the membership proof, and the nullifier are identical; only the question
+of who signed the leaves changes. That is the payoff of merging anonymity into
+V1 -- this rung becomes an integration, not a redesign.
 
 ## V3 -- coercion mitigation, such as it is
 

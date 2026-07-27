@@ -121,9 +121,13 @@ by roll-listed identities; double-voting prevented by identity. Trust lands
 squarely on T4, which is honest -- the organization already decides who its
 members are.
 
-*V2:* anonymous but eligible, via ZK set membership over a Merkle root of the
+*V1:* anonymous but eligible, via ZK set membership over a Merkle root of the
 roll plus a nullifier that makes a second vote from the same member
-detectable without linking either vote to them.
+detectable without linking either vote to them. (This was V2 until 2026-07-26;
+it moved into V1 because encrypting a ballot that is still signed by a named
+identity only defers the disclosure to close. See ROADMAP.md, "Why the rungs
+merged.") *V2* is now the eligibility-issuance ladder above rung 1 -- the same
+mechanism, different signer on the leaves.
 
 *Never solved by us:* "one human, one vote" at population scale. That requires
 an issuer -- a government, a passport authority, a biometric registry -- and

@@ -161,11 +161,39 @@ any time" is the destination. The distance is not mostly cryptographic:
 
 - tallying: solved (section 1);
 - client integrity: this project's contribution (section 3);
-- ballot secrecy: a solved primitive on the IC as of 2025 (vetKD -- see
-  ROADMAP.md V1);
+- ballot secrecy: the *encryption* is a solved primitive on the IC as of 2025
+  (vetKD), but encryption alone yields secrecy-until-close, not a secret
+  ballot -- it has to ship together with anonymity, which is why those are one
+  rung (ROADMAP.md V1, "Why the rungs merged");
 - eligibility at population scale: unsolved as a *trust* question, not a math
   one -- somebody must issue the credential, and who that is, is politics;
 - coercion resistance on uncontrolled devices: genuinely open.
 
 The first three are buildable now. The last two are why V0 aims at a co-op
 board election and not a national one.
+
+## 7. What else this shape fits
+
+The contribution in section 3 is not about voting. It is about any mechanism
+where a client encodes a private input, that input is sealed until a close,
+and a public result is computed from the sealed inputs. Voting is one such
+mechanism. It is not the easiest one.
+
+A mechanism fits this stack when all three hold:
+
+1. inputs must be secret before close;
+2. **full disclosure at close is acceptable, or wanted**;
+3. eligibility is a closed roll, or is handled by collateral.
+
+Condition 2 is the discriminator and secret-ballot voting fails it -- which is
+the whole content of the V1/V2 merge in ROADMAP.md. Ranked-choice voting fails
+it worse, because a published ranking is a fingerprint.
+
+Sealed-bid auctions pass all three, and the trust gap they close is older and
+better documented than the one in voting: the Vickrey auctioneer who sees the
+sealed bids and inserts a phantom one just below the winner's. That attack
+requires *peeking*, which is precisely what a timelock plus an attested client
+removes. See AUCTIONS.md.
+
+This does not dilute the voting claim. It is the same claim, applied where the
+surrounding problem is smaller.
