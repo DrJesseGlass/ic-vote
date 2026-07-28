@@ -37,6 +37,9 @@ expect_red() {
     const fs = require('fs');
     const b = JSON.parse(fs.readFileSync('$WORK/bulletin.json', 'utf8'));
     const OUTSIDER = '$OUTSIDER';
+    // Flip the low bit of the first hex byte: minimal, always-valid-hex
+    // corruption that never needs a second ballot to exist.
+    const flipHex = (s) => (parseInt(s.slice(0, 2), 16) ^ 1).toString(16).padStart(2, '0') + s.slice(2);
     $mutation;
     fs.writeFileSync('$WORK/tampered.json', JSON.stringify(b));
   "
@@ -58,9 +61,18 @@ expect_red "stuff a ballot from a non-member"        "b.log.push({...b.log[0], s
 expect_red "silently drop a ballot"                  "b.log.pop()"
 expect_red "reorder the log"                         "b.log.reverse()"
 expect_red "backdate a ballot's timestamp"           "b.log[0].at = String(BigInt(b.log[0].at) - 1n)"
-expect_red "swap one ballot's signature for another" "b.log[0].sig = b.log[1].sig"
-expect_red "swap one ballot's credential for another" "b.log[0].voter_pubkey = b.log[1].voter_pubkey"
-expect_red "point a ballot at a different voter"     "b.log[0].voter = b.log[1].voter"
+# The credential mutations index only b.log[0]: an earlier version swapped
+# fields with b.log[1], which crashed the whole suite (set -e) on any
+# election with a single ballot instead of testing it.
+expect_red "corrupt a ballot's signature"            "b.log[0].sig = flipHex(b.log[0].sig)"
+expect_red "substitute a ballot's credential key"    "b.log[0].voter_pubkey = b.log[0].voter_pubkey.slice(0, -2) + flipHex(b.log[0].voter_pubkey.slice(-2))"
+expect_red "point a ballot at a different voter"     "b.log[0].voter = OUTSIDER"
+expect_red "extend a signature's expiry after the fact" "b.log[0].sig_expires_at = String(BigInt(b.log[0].sig_expires_at) + 1n)"
+# Verifier robustness, not just detection: these two used to kill the process
+# (BigInt-on-undefined in check E; lenient Buffer.from hex accepting what the
+# browser rejects), which reads as a verifier bug instead of a RED verdict.
+expect_red "out-of-range choice in the log"          "b.log[0].choice = 99"
+expect_red "uppercase-hex credential"                "b.log[0].voter_pubkey = b.log[0].voter_pubkey.toUpperCase()"
 expect_red "enrol a voter after the fact"            "b.roll.push(OUTSIDER)"
 expect_red "drop a voter from the published roll"    "b.roll.pop()"
 expect_red "repoint the election at another bundle"  "b.manifest.pin.bundle_sha256 = 'f'.repeat(64)"

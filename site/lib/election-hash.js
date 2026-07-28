@@ -11,8 +11,13 @@
 // The two rules from the Rust file apply unchanged: every hash is
 // domain-separated, and every variable-length field is length-prefixed.
 
-import { concat, sha256, toHex, utf8 } from "./sha256.js";
-import { principalToBytes, principalToText, selfAuthenticating } from "./principal.js";
+import { concat, equalBytes, sha256, toHex, utf8 } from "./sha256.js";
+import {
+  ED25519_DER_PREFIX,
+  principalToBytes,
+  principalToText,
+  selfAuthenticating,
+} from "./principal.js";
 
 const D_MANIFEST = "ic-vote/v0/manifest";
 const D_ROLL = "ic-vote/v0/roll";
@@ -66,6 +71,12 @@ class W {
   out() {
     return toHex(sha256(concat(...this.parts)));
   }
+  /// The framed bytes themselves, unhashed -- for messages that get signed
+  /// rather than digested. Living on W keeps this file to ONE framing
+  /// implementation, which is the property everything here depends on.
+  outBytes() {
+    return concat(...this.parts);
+  }
 }
 
 function fromHex32(hex) {
@@ -111,28 +122,29 @@ export function manifestHash(m) {
 
 export const logGenesis = (manifestHex) => new W(D_GENESIS).hash(manifestHex).out();
 
-/// The entry hashes the credential (DER public key) and its signature, not
-/// the voter principal -- the principal is derived from the key.
-export const logAppend = (prevHex, seq, pubkeyDer, choice, at, sig) =>
-  new W(D_ENTRY).hash(prevHex).u64(seq).lp(pubkeyDer).u32(choice).u64(at).lp(sig).out();
+/// The entry hashes the credential (DER public key), the signed expiry, and
+/// the signature -- not the voter principal, which is derived from the key.
+export const logAppend = (prevHex, seq, pubkeyDer, choice, at, sigExpiresAt, sig) =>
+  new W(D_ENTRY)
+    .hash(prevHex)
+    .u64(seq)
+    .lp(pubkeyDer)
+    .u32(choice)
+    .u64(at)
+    .u64(sigExpiresAt)
+    .lp(sig)
+    .out();
 
 /// The exact bytes a roll key signs for one ballot. Mirrors
 /// `hashing::ballot_sig_message`: length-prefixed domain, length-prefixed
-/// poll canister principal, 32-byte manifest hash, u32be choice.
-export function ballotSigMessage(canisterIdText, manifestHex, choice) {
-  const domain = utf8(D_BALLOT_SIG);
-  const canister = principalToBytes(canisterIdText);
-  const parts = [];
-  const u32 = (n) => {
-    const b = new Uint8Array(4);
-    new DataView(b.buffer).setUint32(0, Number(n));
-    return b;
-  };
-  parts.push(u32(domain.length), domain);
-  parts.push(u32(canister.length), canister);
-  parts.push(fromHex32(manifestHex));
-  parts.push(u32(choice));
-  return concat(...parts);
+/// poll canister principal, 32-byte manifest hash, u32be choice, u64be
+/// expiry (ns). The expiry is the replay bound: without it a harvested
+/// signature would authorize the ballot for the whole voting window.
+/// `canisterId` may be principal text or the already-decoded bytes.
+export function ballotSigMessage(canisterId, manifestHex, choice, expiresAt) {
+  const canister =
+    canisterId instanceof Uint8Array ? canisterId : principalToBytes(canisterId);
+  return new W(D_BALLOT_SIG).lp(canister).hash(manifestHex).u32(choice).u64(expiresAt).outBytes();
 }
 
 /// Ed25519 verification via WebCrypto. The canister verifies strictly
@@ -199,6 +211,13 @@ export async function recomputeBoard({ manifest, roll, log, canisterId }) {
   const rollSet = new Set(roll);
   const seen = new Set();
   const counts = new Array(manifest.options.length).fill(0);
+  // Decoded once: every ballot's signed message starts with the same
+  // canister principal, and re-deriving it per entry was pure waste.
+  const canisterBytes = principalToBytes(canisterId);
+  // Signature checks are independent of each other, so they all start now
+  // and are awaited together after the synchronous pass -- N WebCrypto
+  // round-trips in flight at once instead of serialized.
+  const sigChecks = [];
   // Chained from OUR manifest hash, not the canister's: a canister that lies
   // about the manifest must not also be able to supply a log that validates
   // against the lie.
@@ -209,34 +228,40 @@ export async function recomputeBoard({ manifest, roll, log, canisterId }) {
     }
     const pubkeyDer = fromHexBytes(entry.voter_pubkey);
     const sig = fromHexBytes(entry.sig);
-    head = logAppend(head, entry.seq, pubkeyDer, entry.choice, entry.at, sig);
+    head = logAppend(head, entry.seq, pubkeyDer, entry.choice, entry.at, entry.sig_expires_at, sig);
     if (head !== entry.entry_hash) {
       problems.push(`log entry ${idx} hash does not chain`);
     }
     // The franchise is derived from the published credential, never taken
     // from the canister's `voter` field -- that field is checked FOR
     // CONSISTENCY with the key, which is the opposite direction of trust.
-    let voter = null;
-    if (pubkeyDer.length !== 44 || toHex(derOf(pubkeyDer)) !== toHex(pubkeyDer)) {
+    if (pubkeyDer.length !== 44 || !equalBytes(pubkeyDer.subarray(0, 12), ED25519_DER_PREFIX)) {
       problems.push(`ballot ${idx} carries a malformed Ed25519 credential`);
     } else {
-      voter = principalToText(selfAuthenticating(pubkeyDer));
+      const voter = principalToText(selfAuthenticating(pubkeyDer));
       if (voter !== entry.voter) {
         problems.push(`ballot ${idx} names ${entry.voter}, but its key derives ${voter}`);
       }
       if (!rollSet.has(voter)) problems.push(`ballot ${idx} is from a voter not on the roll`);
       if (seen.has(voter)) problems.push(`voter in ballot ${idx} appears more than once`);
       seen.add(voter);
-      const msg = ballotSigMessage(canisterId, mh, entry.choice);
-      if (!(await sigVerifies(pubkeyDer, msg, sig))) {
-        problems.push(`ballot ${idx} has an invalid signature`);
+      // The freshness invariant is public: a canister honestly enforcing the
+      // signed expiry can never record `at` past it.
+      if (BigInt(entry.at) > BigInt(entry.sig_expires_at)) {
+        problems.push(`ballot ${idx} was recorded after its signature expired`);
       }
+      const msg = ballotSigMessage(canisterBytes, mh, entry.choice, entry.sig_expires_at);
+      sigChecks.push([idx, sigVerifies(pubkeyDer, msg, sig)]);
     }
     if (entry.choice >= counts.length) {
       problems.push(`ballot ${idx} has choice ${entry.choice}, outside the option list`);
     } else {
       counts[entry.choice] += 1;
     }
+  }
+  // Awaited in index order so `problems` stays deterministic.
+  for (const [idx, check] of sigChecks) {
+    if (!(await check)) problems.push(`ballot ${idx} has an invalid signature`);
   }
 
   return {
@@ -254,11 +279,4 @@ function fromHexBytes(hex) {
   const out = new Uint8Array(hex.length / 2);
   for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.substr(i * 2, 2), 16);
   return out;
-}
-
-/// Re-encode the raw key under the one DER spelling the canister accepts; a
-/// pubkey that does not round-trip has a nonstandard prefix.
-function derOf(pubkeyDer) {
-  const prefix = [0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00];
-  return concat(new Uint8Array(prefix), pubkeyDer.slice(12));
 }

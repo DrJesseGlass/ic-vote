@@ -165,9 +165,23 @@ pub fn log_genesis(manifest: &Hash) -> Hash {
 /// the credential means the chain commits to the evidence of eligibility, not
 /// to the canister's claim about who cast the ballot. A canister that swapped
 /// a signature after the fact would break its own chain.
-pub fn log_append(prev: &Hash, seq: u64, pubkey_der: &[u8], choice: u32, at: u64, sig: &[u8]) -> Hash {
+pub fn log_append(
+    prev: &Hash,
+    seq: u64,
+    pubkey_der: &[u8],
+    choice: u32,
+    at: u64,
+    sig_expires_at: u64,
+    sig: &[u8],
+) -> Hash {
     let mut w = HashWriter::new(D_ENTRY);
-    w.hash(prev).u64(seq).bytes(pubkey_der).u32(choice).u64(at).bytes(sig);
+    w.hash(prev)
+        .u64(seq)
+        .bytes(pubkey_der)
+        .u32(choice)
+        .u64(at)
+        .u64(sig_expires_at)
+        .bytes(sig);
     w.finish()
 }
 
@@ -177,20 +191,33 @@ pub fn log_append(prev: &Hash, seq: u64, pubkey_der: &[u8], choice: u32, at: u64
 /// - this poll canister (`canister_id`), so an identical election created by
 ///   the same administrator on another canister cannot replay it;
 /// - this election instance (`manifest` commits to id, question, options,
-///   roll, and pin), so nothing about the ballot's meaning can drift; and
-/// - the choice itself.
+///   roll, and pin), so nothing about the ballot's meaning can drift;
+/// - the choice itself; and
+/// - an expiry (`expires_at`, ns since epoch). Without it a harvested
+///   (pubkey, sig, choice) tuple is a bearer token any observer could submit
+///   for the rest of the voting window. The envelope's ingress_expiry used to
+///   bound this; when cast stopped reading the envelope, the bound moved in
+///   here. The canister enforces `now <= expires_at <= now + MAX_SIG_TTL`,
+///   and publishing the value in the log lets any verifier reconstruct these
+///   bytes and check `at <= sig_expires_at`.
 ///
 /// Deliberately NOT hashed before signing: Ed25519 signs the message directly,
 /// and a verifier that reconstructs these bytes needs no agreement about an
 /// intermediate hash.
-pub fn ballot_sig_message(canister_id: &[u8], manifest: &Hash, choice: u32) -> Vec<u8> {
-    let mut out = Vec::with_capacity(4 + D_BALLOT_SIG.len() + 4 + canister_id.len() + 32 + 4);
+pub fn ballot_sig_message(
+    canister_id: &[u8],
+    manifest: &Hash,
+    choice: u32,
+    expires_at: u64,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4 + D_BALLOT_SIG.len() + 4 + canister_id.len() + 32 + 4 + 8);
     out.extend_from_slice(&(D_BALLOT_SIG.len() as u32).to_be_bytes());
     out.extend_from_slice(D_BALLOT_SIG);
     out.extend_from_slice(&(canister_id.len() as u32).to_be_bytes());
     out.extend_from_slice(canister_id);
     out.extend_from_slice(manifest);
     out.extend_from_slice(&choice.to_be_bytes());
+    out.extend_from_slice(&expires_at.to_be_bytes());
     out
 }
 
@@ -361,39 +388,44 @@ mod tests {
     #[test]
     fn chain_is_order_sensitive() {
         let g = log_genesis(&h(7));
-        let ab = log_append(&log_append(&g, 0, b"a", 0, 1, b"s"), 1, b"b", 1, 2, b"t");
-        let ba = log_append(&log_append(&g, 0, b"b", 1, 2, b"t"), 1, b"a", 0, 1, b"s");
+        let ab = log_append(&log_append(&g, 0, b"a", 0, 1, 9, b"s"), 1, b"b", 1, 2, 9, b"t");
+        let ba = log_append(&log_append(&g, 0, b"b", 1, 2, 9, b"t"), 1, b"a", 0, 1, 9, b"s");
         assert_ne!(ab, ba);
     }
 
     #[test]
     fn chain_is_bound_to_its_manifest() {
         assert_ne!(
-            log_append(&log_genesis(&h(1)), 0, b"a", 0, 1, b"s"),
-            log_append(&log_genesis(&h(2)), 0, b"a", 0, 1, b"s")
+            log_append(&log_genesis(&h(1)), 0, b"a", 0, 1, 9, b"s"),
+            log_append(&log_genesis(&h(2)), 0, b"a", 0, 1, 9, b"s")
         );
     }
 
     #[test]
-    fn chain_commits_to_the_signature() {
+    fn chain_commits_to_the_signature_and_its_expiry() {
         let g = log_genesis(&h(7));
         assert_ne!(
-            log_append(&g, 0, b"a", 0, 1, b"sig-one"),
-            log_append(&g, 0, b"a", 0, 1, b"sig-two")
+            log_append(&g, 0, b"a", 0, 1, 9, b"sig-one"),
+            log_append(&g, 0, b"a", 0, 1, 9, b"sig-two")
+        );
+        assert_ne!(
+            log_append(&g, 0, b"a", 0, 1, 9, b"sig-one"),
+            log_append(&g, 0, b"a", 0, 1, 8, b"sig-one")
         );
     }
 
     #[test]
     fn ballot_sig_message_separates_every_field() {
-        let base = ballot_sig_message(b"canister", &h(1), 0);
-        assert_ne!(base, ballot_sig_message(b"canisteq", &h(1), 0));
-        assert_ne!(base, ballot_sig_message(b"canister", &h(2), 0));
-        assert_ne!(base, ballot_sig_message(b"canister", &h(1), 1));
+        let base = ballot_sig_message(b"canister", &h(1), 0, 9);
+        assert_ne!(base, ballot_sig_message(b"canisteq", &h(1), 0, 9));
+        assert_ne!(base, ballot_sig_message(b"canister", &h(2), 0, 9));
+        assert_ne!(base, ballot_sig_message(b"canister", &h(1), 1, 9));
+        assert_ne!(base, ballot_sig_message(b"canister", &h(1), 0, 8));
         // Length prefixing: bytes must not slide between canister id and the
         // manifest hash.
         assert_ne!(
-            ballot_sig_message(b"ab", &h(3), 0),
-            ballot_sig_message(b"a", &h(3), 0)
+            ballot_sig_message(b"ab", &h(3), 0, 9),
+            ballot_sig_message(b"a", &h(3), 0, 9)
         );
     }
 

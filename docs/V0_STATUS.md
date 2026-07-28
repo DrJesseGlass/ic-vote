@@ -36,13 +36,13 @@ radius is one file. That is the bet, stated so it can be judged.
 
 | Piece | Where | Evidence |
 |---|---|---|
-| Election lifecycle, roll, one-ballot-per-credential | `canisters/poll/src/state.rs` | 34 unit tests |
+| Election lifecycle, roll, one-ballot-per-credential | `canisters/poll/src/state.rs` | 35 unit tests |
 | Domain-separated, length-prefixed hash rules | `canisters/poll/src/hashing.rs` | property tests over every tree shape |
 | Manifest freezing (question, options, roll, pin) at open | `state.rs::open` | `roll_and_pin_are_frozen_once_open` |
 | Hash-chained public ballot log + voter receipt | `state.rs::cast` | `log_chain_is_recomputable_from_the_published_log` |
 | Caller-blind cast: in-ballot Ed25519 credential, single-use transport key (THREAT_MODEL.md 2.7) | `state.rs::cast`, `credential.rs`, `site/app.js::onCast` | `franchise_is_recomputable_from_the_published_log`; live test asserts the receipt names the credential, not the transport |
 | Merkle root over elections in `certified_data` | `state.rs::certified_root` | `witness_ties_each_election_to_the_certified_root` |
-| Independent CLI verifier (2nd implementation) | `tools/verify-election.mjs` | 15 tamper cases in `tools/tamper-test.sh` |
+| Independent CLI verifier (2nd implementation) | `tools/verify-election.mjs` | 18 tamper cases in `tools/tamper-test.sh` |
 | Hand-written IC agent (CBOR, candid, Ed25519) | `site/lib/` | live-replica tests |
 | Browser-side board recomputation (3rd implementation) | `site/lib/election-hash.js` | agrees with canister + CLI on live data |
 | GREEN/YELLOW/RED verdict rules | `site/lib/verifier.js` | 17 rule tests |

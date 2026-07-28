@@ -5,6 +5,11 @@ type BallotView = record {
   // log so the franchise check is recomputable from published data alone,
   // rather than resting on this canister's word about who called `cast`.
   sig : text;
+  // The expiry the voter signed into the ballot (ns since epoch).
+  // Published so a verifier can reconstruct the signed message and check
+  // the invariant `at <= sig_expires_at` -- the canister enforcing the
+  // expiry is only auditable if the expiry itself is on the board.
+  sig_expires_at : nat64;
   // Derived from `voter_pubkey` (sha224(DER) || 0x02), published for
   // readability. A verifier re-derives it; a `voter` that does not match
   // the key is a forged board.
@@ -163,6 +168,10 @@ type VoteError = variant {
   NotFound;
   WrongPhase : record { actual : text; expected : text };
   NotAdmin;
+  // The ballot's signed expiry is in the past. Distinct from
+  // `InvalidSignature` so a voter whose ballot sat too long gets "sign a
+  // fresh one", not "your key is wrong".
+  SignatureExpired;
   EmptyRoll;
   NotEligible;
   AnonymousCaller;
@@ -186,7 +195,12 @@ service : () -> {
   // over `hashing::ballot_sig_message(self, manifest, choice)`. The credential
   // and signature are published in the log, so the franchise check no longer
   // rests on believing this canister recorded callers honestly.
-  cast : (nat64, nat32, blob, blob) -> (Result);
+  // `sig_expires_at` (ns since epoch) is signed into the ballot message and
+  // bounds how long the signature authorizes anything: past it the cast is
+  // refused, and it may not lie more than `state::MAX_SIG_TTL_NS` ahead of
+  // subnet time. This is the freshness bound the ingress envelope used to
+  // provide, relocated into the ballot itself.
+  cast : (nat64, nat32, blob, blob, nat64) -> (Result);
   // The log head, its Merkle witness, and the IC state certificate.
   // 
   // This is the one read that does not require trusting the replying replica:

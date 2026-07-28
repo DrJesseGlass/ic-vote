@@ -40,7 +40,22 @@ ADMIN="${ADMIN_IDENTITY:-icvote-localtest-admin}"
 say() { printf '\n\033[1m== %s\033[0m\n' "$1"; }
 call() { dfx canister call --network "$NETWORK" --identity "$1" poll "${@:2}"; }
 HERE="$(cd "$(dirname "$0")" && pwd)"
-cast() { node "$HERE/cast-ballot.mjs" cast --canister "$CID" "$@"; }
+
+# cast-ballot.mjs speaks HTTP to a replica, not dfx, so NETWORK alone cannot
+# steer it. Without this, admin calls follow $NETWORK while every ballot goes
+# to the hardcoded local default -- on any non-default network the script
+# would open a real election and then die casting into 127.0.0.1.
+if [ -z "${HOST:-}" ]; then
+  case "$NETWORK" in
+    local) HOST="http://127.0.0.1:4943" ;;
+    ic) HOST="https://icp0.io" ;;
+    *)
+      echo "NETWORK='$NETWORK' has no known replica URL; set HOST=<url> explicitly." >&2
+      exit 2
+      ;;
+  esac
+fi
+cast() { node "$HERE/cast-ballot.mjs" cast --canister "$CID" --host "$HOST" "$@"; }
 
 # The admin stays a dfx identity: administration is envelope-authenticated,
 # and that is correct -- it is the ballots that must not be.

@@ -21,6 +21,12 @@ use crate::types::*;
 /// bump.
 pub const MAX_ROLL: usize = 200_000;
 
+/// Longest a ballot signature may be valid for (ns). The client signs
+/// `now + ~5 minutes`; the cap exists so a client cannot mint itself a
+/// window-long bearer token -- a harvested signature must die about as fast
+/// as the ingress envelope it replaced would have (THREAT_MODEL.md 2.7).
+pub const MAX_SIG_TTL_NS: u64 = 15 * 60 * 1_000_000_000;
+
 const ZERO: Hash = [0u8; 32];
 
 #[derive(CandidType, Deserialize, Clone, Debug)]
@@ -32,6 +38,9 @@ pub struct Ballot {
     pub pubkey_der: Vec<u8>,
     pub choice: u32,
     pub at: u64,
+    /// The expiry the voter signed (ns). Invariant: `at <= sig_expires_at`,
+    /// enforced at cast and publicly checkable from the log.
+    pub sig_expires_at: u64,
     /// 64-byte Ed25519 signature over `hashing::ballot_sig_message`.
     pub sig: Vec<u8>,
     pub entry_hash: Hash,
@@ -361,12 +370,25 @@ impl Store {
         choice: u32,
         pubkey_der: Vec<u8>,
         sig: Vec<u8>,
+        sig_expires_at: u64,
         now: u64,
     ) -> Result<Receipt, VoteError> {
         let e = self.get_mut(id)?;
         e.require_phase(Phase::Open)?;
         if choice as usize >= e.options.len() {
             return Err(VoteError::InvalidChoice);
+        }
+        // Freshness: the signature authorizes this ballot only until its own
+        // expiry, and the expiry may not be minted far into the future. This
+        // is the ingress_expiry bound relocated into the ballot, now that the
+        // envelope is deliberately unauthenticated.
+        if now > sig_expires_at {
+            return Err(VoteError::SignatureExpired);
+        }
+        if sig_expires_at > now.saturating_add(MAX_SIG_TTL_NS) {
+            return Err(VoteError::InvalidInput(
+                "sig_expires_at is further than MAX_SIG_TTL in the future".to_string(),
+            ));
         }
         let voter = credential::principal_of(&pubkey_der)?;
         if e.roll.binary_search(&voter).is_err() {
@@ -385,10 +407,11 @@ impl Store {
         // The signature is checked last: it is the expensive step, and every
         // rejection above is decidable from public data alone.
         let manifest = e.manifest_hash.as_ref().expect("Open implies a frozen manifest");
-        let message = hashing::ballot_sig_message(self_id, manifest, choice);
+        let message = hashing::ballot_sig_message(self_id, manifest, choice, sig_expires_at);
         credential::verify(&pubkey_der, &message, &sig)?;
         let seq = e.log.len() as u64;
-        let entry_hash = hashing::log_append(&e.log_head, seq, &pubkey_der, choice, now, &sig);
+        let entry_hash =
+            hashing::log_append(&e.log_head, seq, &pubkey_der, choice, now, sig_expires_at, &sig);
         e.log_head = entry_hash;
         e.log.push(Ballot {
             seq,
@@ -396,6 +419,7 @@ impl Store {
             pubkey_der,
             choice,
             at: now,
+            sig_expires_at,
             sig,
             entry_hash,
         });
@@ -426,6 +450,7 @@ impl Store {
                 voter_pubkey: hex::encode(&b.pubkey_der),
                 choice: b.choice,
                 at: b.at,
+                sig_expires_at: b.sig_expires_at,
                 sig: hex::encode(&b.sig),
                 entry_hash: hex32(&b.entry_hash),
             })
@@ -468,7 +493,7 @@ mod tests {
         (sk, der, principal)
     }
 
-    fn signed(s: &Store, id: u64, seed: u8, choice: u32) -> (Vec<u8>, Vec<u8>) {
+    fn signed(s: &Store, id: u64, seed: u8, choice: u32, expires_at: u64) -> (Vec<u8>, Vec<u8>) {
         let (sk, der, _) = voter(seed);
         // Before open there is no manifest; sign over zeros so the phase
         // check, which fires first, is what the test exercises.
@@ -477,13 +502,14 @@ mod tests {
             .ok()
             .and_then(|e| e.manifest_hash)
             .unwrap_or([0u8; 32]);
-        let msg = hashing::ballot_sig_message(SELF_ID, &manifest, choice);
+        let msg = hashing::ballot_sig_message(SELF_ID, &manifest, choice, expires_at);
         (der, sk.sign(&msg).to_bytes().to_vec())
     }
 
     fn cast(s: &mut Store, id: u64, seed: u8, choice: u32, at: u64) -> Result<Receipt, VoteError> {
-        let (der, sig) = signed(s, id, seed, choice);
-        s.cast(SELF_ID, id, choice, der, sig, at)
+        let expires_at = at + 60;
+        let (der, sig) = signed(s, id, seed, choice, expires_at);
+        s.cast(SELF_ID, id, choice, der, sig, expires_at, at)
     }
 
     fn spec() -> NewElection {
@@ -556,22 +582,50 @@ mod tests {
         let (mut s, id) = opened();
         let head = s.election(id).unwrap().log_head;
         // Voter 11's signature presented with voter 10's key.
-        let (der_10, _) = signed(&s, id, 10, 0);
-        let (_, sig_11) = signed(&s, id, 11, 0);
+        let (der_10, _) = signed(&s, id, 10, 0, 360);
+        let (_, sig_11) = signed(&s, id, 11, 0, 360);
         assert_eq!(
-            s.cast(SELF_ID, id, 0, der_10.clone(), sig_11, 300),
+            s.cast(SELF_ID, id, 0, der_10.clone(), sig_11, 360, 300),
             Err(VoteError::InvalidSignature)
         );
         // A signature over a different choice than the one submitted.
-        let (_, sig_other_choice) = signed(&s, id, 10, 1);
+        let (_, sig_other_choice) = signed(&s, id, 10, 1, 360);
         assert_eq!(
-            s.cast(SELF_ID, id, 0, der_10.clone(), sig_other_choice, 300),
+            s.cast(SELF_ID, id, 0, der_10.clone(), sig_other_choice, 360, 300),
+            Err(VoteError::InvalidSignature)
+        );
+        // A signature over a different expiry than the one submitted.
+        let (_, sig_other_expiry) = signed(&s, id, 10, 0, 361);
+        assert_eq!(
+            s.cast(SELF_ID, id, 0, der_10.clone(), sig_other_expiry, 360, 300),
             Err(VoteError::InvalidSignature)
         );
         assert_eq!(s.election(id).unwrap().log_head, head);
         assert!(s.election(id).unwrap().log.is_empty());
         // And the failures did not consume the voter's ballot.
         assert!(cast(&mut s, id, 10, 0, 301).is_ok());
+    }
+
+    #[test]
+    fn an_expired_or_overlong_signature_is_rejected() {
+        let (mut s, id) = opened();
+        // Expired: now is past the signed expiry. This is the replay bound --
+        // a harvested (pubkey, sig, choice, expiry) tuple dies with it.
+        let (der, sig) = signed(&s, id, 10, 0, 360);
+        assert_eq!(
+            s.cast(SELF_ID, id, 0, der.clone(), sig.clone(), 360, 361),
+            Err(VoteError::SignatureExpired)
+        );
+        // Overlong: a client may not mint a window-long bearer token.
+        let far = 300 + MAX_SIG_TTL_NS + 1;
+        let (der2, sig2) = signed(&s, id, 10, 0, far);
+        assert!(matches!(
+            s.cast(SELF_ID, id, 0, der2, sig2, far, 300),
+            Err(VoteError::InvalidInput(_))
+        ));
+        // The rejections consumed nothing: the same voter still votes, and a
+        // ballot at exactly its expiry instant is valid.
+        assert!(s.cast(SELF_ID, id, 0, der, sig, 360, 360).is_ok());
     }
 
     #[test]
@@ -583,16 +637,16 @@ mod tests {
         s.pin_release(p(1), id_b, pin()).unwrap();
         s.open(p(1), id_b, 900).unwrap();
 
-        let (der, sig) = signed(&s, id_a, 10, 0);
+        let (der, sig) = signed(&s, id_a, 10, 0, 960);
         // The manifests differ (id, opened_at), so the signature is bound to
         // election A and must not land in election B.
         assert_eq!(
-            s.cast(SELF_ID, id_b, 0, der.clone(), sig.clone(), 300),
+            s.cast(SELF_ID, id_b, 0, der.clone(), sig.clone(), 960, 930),
             Err(VoteError::InvalidSignature)
         );
         // Same election, different canister principal: also rejected.
         assert_eq!(
-            s.cast(b"another-canister", id_a, 0, der, sig, 300),
+            s.cast(b"another-canister", id_a, 0, der, sig, 960, 930),
             Err(VoteError::InvalidSignature)
         );
     }
@@ -758,7 +812,15 @@ mod tests {
         let e = s.election(id).unwrap();
         let mut head = hashing::log_genesis(&e.manifest_hash.unwrap());
         for b in &e.log {
-            head = hashing::log_append(&head, b.seq, &b.pubkey_der, b.choice, b.at, &b.sig);
+            head = hashing::log_append(
+                &head,
+                b.seq,
+                &b.pubkey_der,
+                b.choice,
+                b.at,
+                b.sig_expires_at,
+                &b.sig,
+            );
             assert_eq!(head, b.entry_hash);
         }
         assert_eq!(head, e.log_head);
@@ -778,7 +840,10 @@ mod tests {
         for b in &e.log {
             assert_eq!(crate::credential::principal_of(&b.pubkey_der).unwrap(), b.voter);
             assert!(e.roll.binary_search(&b.voter).is_ok());
-            let msg = hashing::ballot_sig_message(SELF_ID, &manifest, b.choice);
+            // The freshness invariant is public: the recorded time never
+            // exceeds the expiry the voter signed.
+            assert!(b.at <= b.sig_expires_at);
+            let msg = hashing::ballot_sig_message(SELF_ID, &manifest, b.choice, b.sig_expires_at);
             assert!(crate::credential::verify(&b.pubkey_der, &msg, &b.sig).is_ok());
         }
     }

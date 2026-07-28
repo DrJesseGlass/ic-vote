@@ -158,11 +158,16 @@ already be caller-blind when V1's encryption arrives, or every "encrypted"
 ballot is attributable the moment the vetKey opens (2.3). Second, the V0
 replacement is itself an upgrade to the public board: the credential (an
 Ed25519 key on the roll) and its signature over (poll canister, manifest
-hash, choice) are published in the log and bound into the entry hash, so
-the franchise check is recomputable from published data instead of resting
-on this canister's word about who called `cast`. In V1 the credential
-column becomes a ZK membership proof and a nullifier; the transport does
-not change.
+hash, choice, expiry) are published in the log and bound into the entry
+hash, so the franchise check is recomputable from published data instead
+of resting on this canister's word about who called `cast`. The signed
+expiry matters: dropping the envelope also dropped its ingress_expiry, and
+without a replacement a harvested (pubkey, sig, choice) tuple would be a
+bearer token any observer -- the gateway above all -- could submit for the
+rest of the window. The canister enforces `now <= expiry <= now + 15 min`,
+and verifiers check the public half of that invariant (`at <= expiry`) per
+ballot. In V1 the credential column becomes a ZK membership proof and a
+nullifier; the transport does not change.
 
 *Residual (not absorbed by "we have ZK"):* the gateway sees source IP and
 timing for every submission -- T5's trust scope for metadata covers all

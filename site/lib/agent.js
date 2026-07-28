@@ -114,10 +114,19 @@ export class Ed25519Identity {
     // Recovering the public key needs care: WebCrypto exports Ed25519 as
     // pkcs8 v1, which contains ONLY the private seed -- an earlier version
     // read "the last 32 bytes" and got the seed, so every reloaded identity
-    // silently became a different principal. The JWK view of the same private
-    // key does carry the public half (its `x` parameter, base64url), in both
-    // browsers and Node.
+    // silently became a different principal. (Consequence of fixing it: a
+    // key stored under that version now reports its true principal, which is
+    // not the seed-derived one it displayed before; any roll enrolled from
+    // the old display needs re-enrolment. There is nothing to migrate to --
+    // the old principal never matched the key.) The JWK view of the same
+    // private key does carry the public half (its `x` parameter, base64url),
+    // in both browsers and Node.
     const jwk = await crypto.subtle.exportKey("jwk", privateKey);
+    if (typeof jwk?.x !== "string" || jwk.x.length === 0) {
+      // Thrown, not guessed around: the caller (app.js) keeps the stored key
+      // and surfaces this message rather than deleting the credential.
+      throw new Error("this browser's WebCrypto cannot export the Ed25519 public key (JWK x missing)");
+    }
     const b64 = jwk.x.replace(/-/g, "+").replace(/_/g, "/");
     const raw = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
     return new Ed25519Identity({ privateKey }, derEncodeEd25519(raw));

@@ -81,8 +81,10 @@ export const ANONYMOUS = new Uint8Array([4]);
 export const ANONYMOUS_TEXT = principalToText(ANONYMOUS);
 
 /// The IC's DER wrapper for an Ed25519 SPKI public key. Fixed 12-byte prefix
-/// followed by the 32-byte raw key.
-const ED25519_DER_PREFIX = new Uint8Array([
+/// followed by the 32-byte raw key. Exported because election-hash.js checks
+/// credentials against it -- the encoder and the checker must share one copy
+/// of this constant or they can drift apart.
+export const ED25519_DER_PREFIX = new Uint8Array([
   0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
 ]);
 

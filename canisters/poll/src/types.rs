@@ -204,6 +204,11 @@ pub struct BallotView {
     pub voter_pubkey: String,
     pub choice: u32,
     pub at: u64,
+    /// The expiry the voter signed into the ballot (ns since epoch).
+    /// Published so a verifier can reconstruct the signed message and check
+    /// the invariant `at <= sig_expires_at` -- the canister enforcing the
+    /// expiry is only auditable if the expiry itself is on the board.
+    pub sig_expires_at: u64,
     /// 128-hex Ed25519 signature over `hashing::ballot_sig_message`. In the
     /// log so the franchise check is recomputable from published data alone,
     /// rather than resting on this canister's word about who called `cast`.
@@ -278,6 +283,10 @@ pub enum VoteError {
     InvalidChoice,
     AnonymousCaller,
     InvalidSignature,
+    /// The ballot's signed expiry is in the past. Distinct from
+    /// `InvalidSignature` so a voter whose ballot sat too long gets "sign a
+    /// fresh one", not "your key is wrong".
+    SignatureExpired,
     InvalidInput(String),
 }
 

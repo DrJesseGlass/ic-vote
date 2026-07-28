@@ -207,22 +207,28 @@ group("election hashing", () => {
   const k2 = new Uint8Array(44).fill(2);
   const s1 = new Uint8Array(64).fill(8);
   const s2 = new Uint8Array(64).fill(9);
-  const ab = eh.logAppend(eh.logAppend(g, 0, k1, 0, 1, s1), 1, k2, 1, 2, s2);
-  const ba = eh.logAppend(eh.logAppend(g, 0, k2, 1, 2, s2), 1, k1, 0, 1, s1);
+  const ab = eh.logAppend(eh.logAppend(g, 0, k1, 0, 1, 9, s1), 1, k2, 1, 2, 9, s2);
+  const ba = eh.logAppend(eh.logAppend(g, 0, k2, 1, 2, 9, s2), 1, k1, 0, 1, 9, s1);
   check("chain is order-sensitive", ab !== ba, true);
   check("chain is bound to its manifest",
-    eh.logAppend(eh.logGenesis("b".repeat(64)), 0, k1, 0, 1, s1) !== eh.logAppend(g, 0, k1, 0, 1, s1), true);
+    eh.logAppend(eh.logGenesis("b".repeat(64)), 0, k1, 0, 1, 9, s1) !== eh.logAppend(g, 0, k1, 0, 1, 9, s1), true);
   check("chain commits to the signature",
-    eh.logAppend(g, 0, k1, 0, 1, s1) !== eh.logAppend(g, 0, k1, 0, 1, s2), true);
+    eh.logAppend(g, 0, k1, 0, 1, 9, s1) !== eh.logAppend(g, 0, k1, 0, 1, 9, s2), true);
+  check("chain commits to the signature's expiry",
+    eh.logAppend(g, 0, k1, 0, 1, 9, s1) !== eh.logAppend(g, 0, k1, 0, 1, 8, s1), true);
   // The signed ballot message separates every field, matching the Rust test.
   const cid = "umobs-yiaaa-aaaab-agyrq-cai";
-  const base = toHex(eh.ballotSigMessage(cid, m, 0));
+  const base = toHex(eh.ballotSigMessage(cid, m, 0, 9n));
   check("ballot message binds the canister",
-    base !== toHex(eh.ballotSigMessage("aaaaa-aa", m, 0)), true);
+    base !== toHex(eh.ballotSigMessage("aaaaa-aa", m, 0, 9n)), true);
   check("ballot message binds the manifest",
-    base !== toHex(eh.ballotSigMessage(cid, "b".repeat(64), 0)), true);
+    base !== toHex(eh.ballotSigMessage(cid, "b".repeat(64), 0, 9n)), true);
   check("ballot message binds the choice",
-    base !== toHex(eh.ballotSigMessage(cid, m, 1)), true);
+    base !== toHex(eh.ballotSigMessage(cid, m, 1, 9n)), true);
+  check("ballot message binds the expiry",
+    base !== toHex(eh.ballotSigMessage(cid, m, 0, 8n)), true);
+  check("ballot message accepts pre-decoded canister bytes",
+    toHex(eh.ballotSigMessage(principalToBytes(cid), m, 0, 9n)), base);
   // Witness recomputation over every shape, as in hashing.rs.
   const leaves = Array.from({ length: 9 }, (_, i) => toHex(sha256(utf8(`leaf${i}`))));
   const root = buildRoot(leaves);
@@ -564,11 +570,12 @@ async function live(canisterId, host) {
   const m2 = unwrap(await agent.query("get_manifest", [["nat64", BigInt(newId)]]));
   const mh2 = eh.manifestHash(m2);
   check("recomputed manifest hash of the fresh election", mh2, m2.manifest_hash);
-  const sig = await identity.signMessage(eh.ballotSigMessage(canisterId, mh2, 1));
+  const expiry = BigInt(Date.now()) * 1_000_000n + 5n * 60n * 1_000_000_000n;
+  const sig = await identity.signMessage(eh.ballotSigMessage(canisterId, mh2, 1, expiry));
   const transport = await Ed25519Identity.generate();
   const submitting = new Agent({ host, canisterId, identity: transport });
   const { value } = await submitting.call("cast", [
-    ["nat64", BigInt(newId)], ["nat32", 1], ["blob", identity.der], ["blob", sig],
+    ["nat64", BigInt(newId)], ["nat32", 1], ["blob", identity.der], ["blob", sig], ["nat64", expiry],
   ]);
   const receipt = unwrap(value);
   check("the receipt names the credential's principal, not the transport's", receipt.voter, voter);
@@ -579,7 +586,7 @@ async function live(canisterId, host) {
   const after = unwrap(await agent.query("certified_head", [["nat64", BigInt(newId)]]));
   check("the receipt hash is the new log head",
     receipt.entry_hash,
-    eh.logAppend(eh.logGenesis(mh2), 0n, identity.der, 1, receipt.at, sig));
+    eh.logAppend(eh.logGenesis(mh2), 0n, identity.der, 1, receipt.at, expiry, sig));
   check("and the canister agrees", after.log_head, receipt.entry_hash);
 
   // The published log must carry the credential, and the board must verify
@@ -593,18 +600,35 @@ async function live(canisterId, host) {
 
   // Casting twice must be refused by the canister, not by the UI -- even from
   // a brand-new transport identity, because the credential is what counts.
-  const sig2 = await identity.signMessage(eh.ballotSigMessage(canisterId, mh2, 0));
+  const sig2 = await identity.signMessage(eh.ballotSigMessage(canisterId, mh2, 0, expiry));
   const transport2 = await Ed25519Identity.generate();
   let rejected = false;
   try {
     const second = await new Agent({ host, canisterId, identity: transport2 }).call("cast", [
-      ["nat64", BigInt(newId)], ["nat32", 0], ["blob", identity.der], ["blob", sig2],
+      ["nat64", BigInt(newId)], ["nat32", 0], ["blob", identity.der], ["blob", sig2], ["nat64", expiry],
     ]);
     rejected = "Err" in second.value && "AlreadyVoted" in second.value.Err;
   } catch {
     rejected = true;
   }
   check("a second ballot from the same credential is refused", rejected, true);
+
+  // An expired signature must be refused: this is the replay bound that
+  // replaced the ingress envelope's expiry (THREAT_MODEL.md 2.7). The
+  // freshness check runs before eligibility, so an un-enrolled key suffices.
+  const voter2 = await Ed25519Identity.generate();
+  const staleExpiry = BigInt(Date.now()) * 1_000_000n - 1_000_000_000n;
+  const staleSig = await voter2.signMessage(eh.ballotSigMessage(canisterId, mh2, 0, staleExpiry));
+  let expired = false;
+  try {
+    const res = await new Agent({ host, canisterId, identity: await Ed25519Identity.generate() }).call("cast", [
+      ["nat64", BigInt(newId)], ["nat32", 0], ["blob", voter2.der], ["blob", staleSig], ["nat64", staleExpiry],
+    ]);
+    expired = "Err" in res.value && "SignatureExpired" in res.value.Err;
+  } catch {
+    expired = true;
+  }
+  check("an expired ballot signature is refused", expired, true);
 }
 
 function unwrap(result) {
