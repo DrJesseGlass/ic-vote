@@ -199,9 +199,28 @@ def to_check_json(r1cs, names=None):
     }
 
 
+def _non_constant(lc, prime):
+    """True if this linear combination involves any actual wire.
+
+    Wire 0 is the constant one, so a side that touches only wire 0 is a
+    constant factor -- which is exactly how Circom encodes a linear
+    constraint as a product: (A.w) * 1 = C.w arrives with b = {"0": 1}.
+    Classifying by mere non-emptiness counted those as quadratic, which
+    misreported most ordinary linear constraints and invalidated the
+    linear/quadratic structural comparison docs/CIRCUIT_TESTING.md relies
+    on. A zero coefficient (mod p) contributes nothing either way.
+    """
+    return any(int(w) != 0 and int(v) % prime != 0 for w, v in lc.items())
+
+
 def summarise(r1cs, out_json, stream=sys.stderr):
     n_in = len(out_json["inputs"])
-    quadratic = sum(1 for c in r1cs["constraints"] if c["a"] and c["b"])
+    prime = r1cs["prime"]
+    quadratic = sum(
+        1
+        for c in r1cs["constraints"]
+        if _non_constant(c["a"], prime) and _non_constant(c["b"], prime)
+    )
     print(
         "wires %d | outputs %d | inputs %d (%d public, %d private) | "
         "constraints %d (%d quadratic, %d linear)"
@@ -306,6 +325,16 @@ def selftest():
         ("public then private inputs follow outputs", spec["inputs"] == [2, 3, 4]),
         ("wire 0 is the constant", spec["signals"][0] == "one"),
         ("intermediates are excluded from inputs", 5 not in spec["inputs"]),
+        # The linear/quadratic split. Circom writes a linear constraint as
+        # (A.w) * 1 = C.w, so a side holding only the constant wire must not
+        # make the constraint quadratic.
+        ("wire product is quadratic",
+         _non_constant({"2": "1"}, BN254) and _non_constant({"3": "1"}, BN254)),
+        ("constant-one side makes it linear", not _non_constant({"0": "1"}, BN254)),
+        ("zero coefficient does not make a side real",
+         not _non_constant({"2": "0"}, BN254)),
+        ("coefficient equal to p is zero mod p",
+         not _non_constant({"2": str(BN254)}, BN254)),
     ]
     for label, ok in checks:
         print("  %-32s %s" % (label, "ok" if ok else "!! FAILED"))
