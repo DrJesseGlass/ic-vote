@@ -14,14 +14,22 @@
 //! does not rest on believing this canister.
 //!
 //! Everything in `state.rs` is pure and unit-tested. This file is the thin
-//! shell that supplies `caller`, `time`, and certified data.
+//! shell that supplies environment values -- `caller` for administration,
+//! `time`, the canister's own principal for `cast` -- and certified data.
+//!
+//! `cast` deliberately does NOT read `msg_caller` (THREAT_MODEL.md 2.7):
+//! eligibility rides on an in-ballot Ed25519 credential, and the client
+//! submits from a single-use transport key so the envelope links the ballot
+//! to nobody. In V1 the credential column is replaced by a ZK membership
+//! proof; the transport stays exactly like this.
 
+mod credential;
 mod hashing;
 mod state;
 mod types;
 
 use candid::Principal;
-use ic_cdk::api::{certified_data_set, data_certificate, msg_caller, time};
+use ic_cdk::api::{canister_self, certified_data_set, data_certificate, msg_caller, time};
 use std::cell::RefCell;
 
 use state::Store;
@@ -92,13 +100,44 @@ fn close_election(election_id: u64) -> Result<ElectionView, VoteError> {
 
 // --- voting ---------------------------------------------------------------
 
-/// Cast one ballot. The caller's principal is the signature: the IC has
-/// already authenticated the message envelope, so there is no separate
-/// signature to check or to get wrong.
+/// Cast one ballot, credentialed by an in-ballot signature rather than by the
+/// message envelope.
+///
+/// An earlier version read `msg_caller` here and documented it as "the IC has
+/// already authenticated the envelope". True, and exactly the problem: it
+/// bound every ballot to the transport identity, which V1's encrypted ballots
+/// would have republished as voter-to-choice at close (THREAT_MODEL.md 2.7).
+/// Now the envelope caller is never read -- any caller, including the
+/// anonymous principal, may deliver a ballot -- and eligibility is decided by
+/// `credential::principal_of(voter_pubkey)` against the roll plus a signature
+/// over `hashing::ballot_sig_message(self, manifest, choice)`. The credential
+/// and signature are published in the log, so the franchise check no longer
+/// rests on believing this canister recorded callers honestly.
+/// `sig_expires_at` (ns since epoch) is signed into the ballot message and
+/// bounds how long the signature authorizes anything: past it the cast is
+/// refused, and it may not lie more than `state::MAX_SIG_TTL_NS` ahead of
+/// subnet time. This is the freshness bound the ingress envelope used to
+/// provide, relocated into the ballot itself.
 #[ic_cdk::update]
-fn cast(election_id: u64, choice: u32) -> Result<Receipt, VoteError> {
-    let (caller, now) = (msg_caller(), time());
-    with_mut(|s| s.cast(caller, election_id, choice, now))
+fn cast(
+    election_id: u64,
+    choice: u32,
+    voter_pubkey: Vec<u8>,
+    sig: Vec<u8>,
+    sig_expires_at: u64,
+) -> Result<Receipt, VoteError> {
+    let (self_id, now) = (canister_self(), time());
+    with_mut(|s| {
+        s.cast(
+            self_id.as_slice(),
+            election_id,
+            choice,
+            voter_pubkey,
+            sig,
+            sig_expires_at,
+            now,
+        )
+    })
 }
 
 // --- the public bulletin board -------------------------------------------
@@ -196,18 +235,42 @@ fn init() {
     STORE.with(|s| recertify(&s.borrow()));
 }
 
+/// Stable-state format version, bumped on every incompatible change to
+/// `Store`'s serialization. v2 = signed ballots (pubkey_der, sig,
+/// sig_expires_at in every log entry; "ic-vote/v0/log-entry-signed" chain
+/// rule). The unversioned original format is treated as v1.
+///
+/// v1 -> v2 is DELIBERATELY not migratable in place: a v1 ballot has no
+/// credential or signature, and inventing placeholders would publish a board
+/// whose franchise check the project's own verifiers must reject. A v1
+/// canister with live elections stays on v1 code until its elections close;
+/// upgrading requires `--mode reinstall`, which wipes state, and the trap
+/// message below says so instead of pretending the upgrade might work.
+const STATE_FORMAT: u32 = 2;
+
 #[ic_cdk::pre_upgrade]
 fn pre_upgrade() {
     STORE.with(|s| {
-        ic_cdk::storage::stable_save((s.borrow().clone(),))
+        ic_cdk::storage::stable_save((STATE_FORMAT, s.borrow().clone()))
             .expect("failed to write state to stable memory");
     });
 }
 
 #[ic_cdk::post_upgrade]
 fn post_upgrade() {
-    let (store,): (Store,) =
-        ic_cdk::storage::stable_restore().expect("failed to read state from stable memory");
+    let (version, store): (u32, Store) = ic_cdk::storage::stable_restore().expect(
+        "stable state is not in the versioned signed-ballot format (v2). If this \
+         canister was running the pre-signature code, its state cannot be \
+         migrated: old ballots carry no credential or signature, so they cannot \
+         appear on a v2 board without failing every verifier. Close or abandon \
+         the old elections and redeploy with `--mode reinstall` (this WIPES all \
+         elections), or keep running the old module until they close.",
+    );
+    assert_eq!(
+        version, STATE_FORMAT,
+        "stable state format is v{version}, this module reads v{STATE_FORMAT}; \
+         refusing to guess at a migration"
+    );
     STORE.with(|s| {
         *s.borrow_mut() = store;
         // Certified data does not survive an upgrade, so republishing it here

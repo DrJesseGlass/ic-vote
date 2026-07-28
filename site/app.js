@@ -27,10 +27,13 @@ const state = {
   config: null,
   agent: null,
   identity: null,
+  identityWarning: null,
   elections: [],
   current: null, // { view, manifest, roll, log, head, board }
   verdict: null,
   acknowledged: false,
+  // Monotonic token for in-flight election loads; see selectElection.
+  loadSeq: 0,
 };
 
 // --- boot -----------------------------------------------------------------
@@ -76,11 +79,18 @@ async function loadOrCreateIdentity() {
   if (stored) {
     try {
       return await Ed25519Identity.fromPkcs8(fromHex(stored));
-    } catch {
-      // A key we cannot load is a key we cannot vote with; replacing it is
-      // better than a page that silently falls back to anonymous and then
-      // reports NotEligible for reasons the voter cannot see.
-      localStorage.removeItem(IDENTITY_KEY);
+    } catch (e) {
+      // The stored key is the voter's enrolment credential, possibly the only
+      // copy. An earlier version deleted it here and minted a fresh identity,
+      // which turned ANY load failure -- including a browser that cannot
+      // export Ed25519 JWKs today but could tomorrow -- into permanent, silent
+      // disenfranchisement. So: leave storage untouched, run this session on
+      // a throwaway in-memory identity, and say so next to the principal.
+      state.identityWarning =
+        `The stored voting credential could not be loaded on this browser (${e.message}). ` +
+        `It has NOT been deleted. This session is using a temporary identity that is ` +
+        `not on any roll; try another browser before re-enrolling.`;
+      return await Ed25519Identity.generate();
     }
   }
   const identity = await Ed25519Identity.generate();
@@ -91,6 +101,12 @@ async function loadOrCreateIdentity() {
 // --- election loading -----------------------------------------------------
 
 async function selectElection(id) {
+  // Everything below awaits, and the voter can click another election while
+  // any of it is in flight. The sequence token makes the last click win:
+  // stale flows compute into locals and then discard themselves, so
+  // state.current is only ever a fully-built object for the latest selection
+  // -- board included, which is what keeps renderBoard's dereferences safe.
+  const seq = ++state.loadSeq;
   const anon = new Agent({ host: state.config.host, canisterId: state.config.pollCanisterId });
   const view = unwrap(await anon.query("get_election", [["nat64", id]]));
   const head = unwrap(await anon.query("certified_head", [["nat64", id]]));
@@ -103,20 +119,27 @@ async function selectElection(id) {
     // Draft elections have no frozen manifest yet.
   }
 
-  state.current = { view, manifest, roll, log, head };
-  state.acknowledged = false;
-  renderElection();
-
+  const current = { view, manifest, roll, log, head };
   // Recompute the board before verifying provenance: the two are independent,
   // and a voter should see a recomputed tally even on a page that fails its
   // own provenance check. Failing provenance means "do not trust this page to
   // take your vote", not "hide the public record".
   if (manifest) {
-    state.current.board = eh.recomputeBoard({ manifest, roll, log });
-    renderBoard();
+    current.board = await eh.recomputeBoard({
+      manifest,
+      roll,
+      log,
+      canisterId: state.config.pollCanisterId,
+    });
   }
 
-  await verifyProvenance();
+  if (seq !== state.loadSeq) return;
+  state.current = current;
+  state.acknowledged = false;
+  renderElection();
+  if (current.board) renderBoard();
+
+  await verifyProvenance(seq);
 }
 
 async function pageAll(agent, method, id, pageSize) {
@@ -147,7 +170,11 @@ function describeError(err) {
     case "WrongPhase":
       return `The election is ${value.actual}, not ${value.expected}.`;
     case "AnonymousCaller":
-      return "An anonymous identity cannot vote.";
+      return "An anonymous identity cannot perform this action.";
+    case "InvalidSignature":
+      return "The ballot's signature did not verify. If this page's provenance is GREEN, report it: it means the election this page verified is not the one the canister is running.";
+    case "SignatureExpired":
+      return "This ballot's signature expired before it reached the canister. Nothing was cast; try again.";
     case "InvalidChoice":
       return "That option does not exist on this ballot.";
     case "InvalidInput":
@@ -159,7 +186,7 @@ function describeError(err) {
 
 // --- provenance -----------------------------------------------------------
 
-async function verifyProvenance() {
+async function verifyProvenance(seq = state.loadSeq) {
   const pin = state.current?.manifest?.pin ?? null;
 
   const served = await attempt(() => prov.servedBundle(new URL("./index.html", location.href).href));
@@ -211,6 +238,9 @@ async function verifyProvenance() {
   // warning it should have raised.
   if (liveModuleHash?.hash) localStorage.setItem(LAST_MODULE_HASH_KEY, liveModuleHash.hash);
 
+  // A newer election was selected while the reads above were in flight; its
+  // own verifyProvenance owns the verdict panel now.
+  if (seq !== state.loadSeq) return;
   state.verdict = verdict;
   renderVerdict(verdict);
   renderBallot();
@@ -315,11 +345,14 @@ function renderElection() {
   $("identity-principal").textContent = state.identity.principalText;
   const onRoll = state.current.roll.includes(state.identity.principalText);
   const voted = state.current.log.some((b) => b.voter === state.identity.principalText);
-  $("identity-status").textContent = voted
+  const status = voted
     ? "You have already voted in this election."
     : onRoll
       ? "You are on this election's roll."
       : "You are not on this election's roll, so this canister will refuse your ballot.";
+  $("identity-status").textContent = state.identityWarning
+    ? `${state.identityWarning} ${status}`
+    : status;
 }
 
 function renderBallot() {
@@ -394,14 +427,40 @@ async function onCast(event) {
   button.disabled = true;
   button.textContent = "Casting...";
   try {
-    const signing = new Agent({
+    const choice = Number(chosen.value);
+    // Five minutes, matching the ingress-envelope lifetime this signature
+    // replaced: a harvested ballot signature must die about as fast as the
+    // captured envelope would have (THREAT_MODEL.md 2.7). The canister
+    // refuses anything past its expiry or minted with a longer TTL.
+    const sigExpiresAt = BigInt(Date.now()) * 1_000_000n + 5n * 60n * 1_000_000_000n;
+    // The credential signature covers the manifest hash THIS CLIENT computed
+    // (board.manifestHash), not the canister's copy: the voter signs the
+    // election they verified, so a canister lying about the manifest cannot
+    // collect a signature that endorses the lie.
+    const message = eh.ballotSigMessage(
+      state.config.pollCanisterId,
+      state.current.board.manifestHash,
+      choice,
+      sigExpiresAt
+    );
+    const sig = await state.identity.signMessage(message);
+    // The transport identity is generated for this one message and dropped.
+    // The roll identity signs the ballot's contents; nothing about the
+    // envelope may link back to it (THREAT_MODEL.md 2.7). Network and timing
+    // metadata still can, and that residual is the gateway's to see -- not
+    // something this page can remove.
+    const transport = await Ed25519Identity.generate();
+    const submitting = new Agent({
       host: state.config.host,
       canisterId: state.config.pollCanisterId,
-      identity: state.identity,
+      identity: transport,
     });
-    const { value } = await signing.call("cast", [
+    const { value } = await submitting.call("cast", [
       ["nat64", state.current.view.id],
-      ["nat32", Number(chosen.value)],
+      ["nat32", choice],
+      ["blob", state.identity.der],
+      ["blob", sig],
+      ["nat64", sigExpiresAt],
     ]);
     const receipt = unwrap(value);
     $("receipt").classList.remove("hidden");
@@ -457,7 +516,16 @@ function renderBoard() {
       log: state.current.log,
       certified_head: head,
     };
-    const json = JSON.stringify(bulletin, (_k, v) => (typeof v === "bigint" ? String(v) : v), 2);
+    // Uint8Array fields (the IC certificate) must become hex: JSON.stringify
+    // would otherwise render them as {"0":217,"1":...}, which the CLI
+    // verifier's optBlob rejects -- turning every browser-exported bulletin
+    // into a false RED at check G. optBlob accepts hex strings.
+    const json = JSON.stringify(
+      bulletin,
+      (_k, v) =>
+        typeof v === "bigint" ? String(v) : v instanceof Uint8Array ? toHex(v) : v,
+      2
+    );
     const url = URL.createObjectURL(new Blob([json], { type: "application/json" }));
     const a = el("a", { href: url, download: `ic-vote-election-${manifest.id}.json` });
     a.click();

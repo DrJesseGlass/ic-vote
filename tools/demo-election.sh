@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # End-to-end V0 exercise against a local replica: create an election, enrol a
-# roll, pin a release, open, cast three ballots, refuse two illegitimate ones,
-# close, then hand the result to the independent verifier.
+# roll of Ed25519 credentials, pin a release, open, cast three ballots the way
+# the page does (in-ballot signature, single-use transport key), refuse four
+# illegitimate ones, close, then hand the result to the independent verifier.
 #
 # The point of the last step is that this script's own output is not evidence.
 # `dfx canister call` reports whatever the canister says. Only
@@ -17,8 +18,14 @@
 set -euo pipefail
 
 NETWORK="${NETWORK:-local}"
-VOTERS=(icvote-localtest-a icvote-localtest-b icvote-localtest-c)
-OUTSIDER=icvote-localtest-outsider
+# Voters are Ed25519 credentials, not dfx identities: a ballot is credentialed
+# by an in-ballot signature and submitted from a single-use transport key
+# (THREAT_MODEL.md 2.7), which dfx's secp256k1 envelope signing cannot do.
+# tools/cast-ballot.mjs drives the same site/lib code the page ships, so every
+# cast below is a live test of the voter's real path. Keys are throwaways in a
+# temp dir, gone when this script exits.
+KEYDIR="$(mktemp -d)"
+trap 'rm -rf "$KEYDIR"' EXIT
 # A throwaway identity by default, rather than whatever the user has selected:
 # the demo must not depend on -- or implicate -- an operator identity. The
 # `icvote-localtest-` prefix is deliberate: a name an operator might plausibly
@@ -32,22 +39,43 @@ ADMIN="${ADMIN_IDENTITY:-icvote-localtest-admin}"
 
 say() { printf '\n\033[1m== %s\033[0m\n' "$1"; }
 call() { dfx canister call --network "$NETWORK" --identity "$1" poll "${@:2}"; }
+HERE="$(cd "$(dirname "$0")" && pwd)"
 
-# Create only what is missing, so this never writes a plaintext key over -- or
-# silently reuses -- an identity someone else made.
-for who in "$ADMIN" "${VOTERS[@]}" "$OUTSIDER"; do
-  if ! dfx identity get-principal --identity "$who" </dev/null >/dev/null 2>&1; then
-    dfx identity new --storage-mode plaintext "$who" </dev/null >/dev/null 2>&1
-  fi
-done
+# cast-ballot.mjs speaks HTTP to a replica, not dfx, so NETWORK alone cannot
+# steer it. Without this, admin calls follow $NETWORK while every ballot goes
+# to the hardcoded local default -- on any non-default network the script
+# would open a real election and then die casting into 127.0.0.1.
+if [ -z "${HOST:-}" ]; then
+  case "$NETWORK" in
+    local) HOST="http://127.0.0.1:4943" ;;
+    ic) HOST="https://icp0.io" ;;
+    *)
+      echo "NETWORK='$NETWORK' has no known replica URL; set HOST=<url> explicitly." >&2
+      exit 2
+      ;;
+  esac
+fi
+cast() { node "$HERE/cast-ballot.mjs" cast --canister "$CID" --host "$HOST" "$@"; }
+
+# The admin stays a dfx identity: administration is envelope-authenticated,
+# and that is correct -- it is the ballots that must not be.
+if ! dfx identity get-principal --identity "$ADMIN" </dev/null >/dev/null 2>&1; then
+  dfx identity new --storage-mode plaintext "$ADMIN" </dev/null >/dev/null 2>&1
+fi
+CID="$(dfx canister id --network "$NETWORK" --identity "$ADMIN" poll)"
 
 say "participants"
 echo "  admin    $ADMIN"
 declare -a P
-for i in 0 1 2; do
-  P[$i]="$(dfx identity get-principal --identity "${VOTERS[$i]}")"
-  echo "  ${VOTERS[$i]}  ${P[$i]}"
+# voter-3 is enrolled but casts only the deliberately-mismatched ballot at the
+# end: every earlier refusal (NotEligible, AlreadyVoted, InvalidChoice) fires
+# before the signature check, so proving InvalidSignature needs an eligible
+# voter with an unspent ballot.
+for i in 0 1 2 3; do
+  P[$i]="$(node "$HERE/cast-ballot.mjs" keygen --key "$KEYDIR/voter-$i.key")"
+  echo "  voter-$i  ${P[$i]}"
 done
+node "$HERE/cast-ballot.mjs" keygen --key "$KEYDIR/outsider.key" >/dev/null
 
 say "create election"
 ID=$(call "$ADMIN" create_election \
@@ -64,7 +92,7 @@ echo "  election id $ID"
 
 say "enrol roll"
 call "$ADMIN" set_roll \
-  "($ID:nat64, vec { principal \"${P[0]}\"; principal \"${P[1]}\"; principal \"${P[2]}\" })"
+  "($ID:nat64, vec { principal \"${P[0]}\"; principal \"${P[1]}\"; principal \"${P[2]}\"; principal \"${P[3]}\" })"
 
 say "pin the release voters must be running"
 # Placeholder values: this repo has not been pushed to ic-git yet, so there is
@@ -89,21 +117,24 @@ call "$ADMIN" pin_release \
 say "open the voting window"
 call "$ADMIN" open_election "($ID:nat64)"
 
-say "cast ballots"
+say "cast ballots (in-ballot signature, single-use transport key)"
 for pair in "0 0" "1 0" "2 1"; do
   set -- $pair
-  echo "  ${VOTERS[$1]} -> option $2"
-  call "${VOTERS[$1]}" cast "($ID:nat64, $2:nat32)"
+  echo "  voter-$1 -> option $2"
+  cast --key "$KEYDIR/voter-$1.key" --election "$ID" --choice "$2"
 done
 
 say "a non-member tries to vote (must be refused)"
-call "$OUTSIDER" cast "($ID:nat64, 0:nat32)" || true
+cast --key "$KEYDIR/outsider.key" --election "$ID" --choice 0 || true
 
 say "a member tries to vote twice (must be refused)"
-call "${VOTERS[0]}" cast "($ID:nat64, 1:nat32)" || true
+cast --key "$KEYDIR/voter-0.key" --election "$ID" --choice 1 || true
 
 say "an out-of-range choice (must be refused)"
-call "${VOTERS[1]}" cast "($ID:nat64, 99:nat32)" || true
+cast --key "$KEYDIR/voter-1.key" --election "$ID" --choice 99 || true
+
+say "a signature over a different choice than submitted (must be refused)"
+cast --key "$KEYDIR/voter-3.key" --election "$ID" --choice 0 --sign-choice 1 || true
 
 say "close"
 call "$ADMIN" close_election "($ID:nat64)"

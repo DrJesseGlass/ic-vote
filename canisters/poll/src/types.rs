@@ -196,9 +196,23 @@ pub struct Manifest {
 #[derive(CandidType, Deserialize, Clone, Debug)]
 pub struct BallotView {
     pub seq: u64,
+    /// Derived from `voter_pubkey` (sha224(DER) || 0x02), published for
+    /// readability. A verifier re-derives it; a `voter` that does not match
+    /// the key is a forged board.
     pub voter: Principal,
+    /// 88-hex DER-encoded Ed25519 public key: the ballot's credential.
+    pub voter_pubkey: String,
     pub choice: u32,
     pub at: u64,
+    /// The expiry the voter signed into the ballot (ns since epoch).
+    /// Published so a verifier can reconstruct the signed message and check
+    /// the invariant `at <= sig_expires_at` -- the canister enforcing the
+    /// expiry is only auditable if the expiry itself is on the board.
+    pub sig_expires_at: u64,
+    /// 128-hex Ed25519 signature over `hashing::ballot_sig_message`. In the
+    /// log so the franchise check is recomputable from published data alone,
+    /// rather than resting on this canister's word about who called `cast`.
+    pub sig: String,
     /// 64-hex chain head after this entry -- the voter's receipt.
     pub entry_hash: String,
 }
@@ -268,6 +282,11 @@ pub enum VoteError {
     AlreadyVoted,
     InvalidChoice,
     AnonymousCaller,
+    InvalidSignature,
+    /// The ballot's signed expiry is in the past. Distinct from
+    /// `InvalidSignature` so a voter whose ballot sat too long gets "sign a
+    /// fresh one", not "your key is wrong".
+    SignatureExpired,
     InvalidInput(String),
 }
 

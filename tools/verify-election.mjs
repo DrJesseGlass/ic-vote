@@ -12,7 +12,9 @@
 //   A. roll_hash  -- the published roll hashes to what the manifest commits to
 //   B. manifest   -- manifest_hash is what its own published fields produce
 //   C. chain      -- every log entry_hash chains from genesis; head matches
-//   D. franchise  -- every ballot is from a roll member, once, in range
+//   D. franchise  -- every ballot's key derives a roll member, once, in
+//                    range, with a valid signature over (canister, manifest,
+//                    choice)
 //   E. tally      -- counts recomputed from the log, and tally_hash over them
 //   F. inclusion  -- the election's Merkle leaf + witness reproduce a root
 //   G. certified  -- that root is the certified_data inside the IC certificate
@@ -35,7 +37,7 @@
 // --fetch shells out to `dfx` purely as a transport. dfx is not trusted:
 // everything it returns is re-derived here.
 
-import { createHash } from "node:crypto";
+import { createHash, createPublicKey, verify as ed25519Verify } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 
@@ -46,7 +48,9 @@ import { readFileSync, writeFileSync } from "node:fs";
 const D_MANIFEST = "ic-vote/v0/manifest";
 const D_ROLL = "ic-vote/v0/roll";
 const D_GENESIS = "ic-vote/v0/log-genesis";
-const D_ENTRY = "ic-vote/v0/log-entry";
+// "-signed": see the note on D_ENTRY in canisters/poll/src/hashing.rs.
+const D_ENTRY = "ic-vote/v0/log-entry-signed";
+const D_BALLOT_SIG = "ic-vote/v0/ballot-sig";
 const D_TALLY = "ic-vote/v0/tally";
 const D_LEAF = "ic-vote/v0/merkle-leaf";
 const D_NODE = "ic-vote/v0/merkle-node";
@@ -128,8 +132,58 @@ const manifestHash = (m) => {
 
 const logGenesis = (manifest) => new W(D_GENESIS).h(manifest).out();
 
-const logAppend = (prev, seq, voterBytes, choice, at) =>
-  new W(D_ENTRY).h(prev).u64(seq).lp(voterBytes).u32(choice).u64(at).out();
+const logAppend = (prev, seq, pubkeyDer, choice, at, sigExpiresAt, sig) =>
+  new W(D_ENTRY).h(prev).u64(seq).lp(pubkeyDer).u32(choice).u64(at).u64(sigExpiresAt).lp(sig).out();
+
+// --------------------------------------------------------------------------
+// the ballot credential -- mirrors canisters/poll/src/credential.rs
+// --------------------------------------------------------------------------
+
+/// The one DER spelling of an Ed25519 SPKI key the canister accepts.
+const DER_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
+
+/// Self-authenticating principal: sha224(DER) || 0x02, the IC's own rule.
+const principalOfKey = (pubkeyDer) =>
+  Buffer.concat([createHash("sha224").update(pubkeyDer).digest(), Buffer.from([0x02])]);
+
+/// The exact bytes the roll key signed: length-prefixed domain, length-
+/// prefixed poll canister principal, manifest hash, u32be choice, u64be
+/// expiry. The expiry is the replay bound; it is republished per ballot so
+/// this reconstruction is possible.
+function ballotSigMessage(canisterBytes, manifestHex, choice, sigExpiresAt) {
+  const domain = Buffer.from(D_BALLOT_SIG, "utf8");
+  return Buffer.concat([
+    u32be(domain.length), domain,
+    u32be(canisterBytes.length), canisterBytes,
+    Buffer.from(manifestHex, "hex"),
+    u32be(choice),
+    u64be(sigExpiresAt),
+  ]);
+}
+
+/// Strict lowercase-hex decode, agreeing byte-for-byte with the browser's
+/// fromHexBytes (site/lib/election-hash.js). Node's Buffer.from(s, "hex")
+/// accepts uppercase and silently truncates at the first bad character, so
+/// using it here let this tool pass bulletins every voter's browser flags as
+/// forged -- the two independent implementations must reject the same inputs.
+/// Returns null on anything non-conforming; callers turn that into a FAIL.
+function strictHex(s) {
+  if (typeof s !== "string" || s.length % 2 !== 0 || /[^0-9a-f]/.test(s)) return null;
+  return Buffer.from(s, "hex");
+}
+
+/// Node's Ed25519 accepts the SPKI DER directly. Its check is laxer than the
+/// canister's verify_strict, so everything the canister accepted verifies
+/// here; the reverse direction never matters because this tool only reads
+/// logs the canister built.
+function sigVerifies(pubkeyDer, message, sig) {
+  try {
+    const key = createPublicKey({ key: pubkeyDer, format: "der", type: "spki" });
+    return ed25519Verify(null, message, key, sig);
+  } catch {
+    return false;
+  }
+}
 
 const tallyHash = (manifest, head, counts) => {
   const w = new W(D_TALLY).h(manifest).h(head).u32(counts.length);
@@ -449,7 +503,8 @@ function verify(b) {
 
   // C -- the chain. Recomputed from OUR manifest hash, not the canister's, so
   // a canister that lies about the manifest cannot also hand us a chain that
-  // validates against the lie.
+  // validates against the lie. The chain covers each ballot's credential and
+  // signature, so none of them can have been swapped after the fact.
   let head = logGenesis(mh);
   let chainOk = true;
   b.log.forEach((entry, idx) => {
@@ -458,12 +513,20 @@ function verify(b) {
       fail("C. chain", `entry ${idx} has seq ${seq}; the log must be dense and in order`);
       chainOk = false;
     }
+    const pubkeyDer = strictHex(entry.voter_pubkey);
+    const sig = strictHex(entry.sig);
+    if (!pubkeyDer || !sig) {
+      fail("C. chain", `entry ${idx} credential/signature is not lowercase even-length hex`);
+      chainOk = false;
+    }
     head = logAppend(
       head,
       seq,
-      principalToBytes(entry.voter),
+      pubkeyDer ?? Buffer.alloc(0),
       Number(entry.choice),
-      u64(entry.at, `log[${idx}].at`)
+      u64(entry.at, `log[${idx}].at`),
+      u64(entry.sig_expires_at, `log[${idx}].sig_expires_at`),
+      sig ?? Buffer.alloc(0)
     );
     if (head !== entry.entry_hash) {
       fail("C. chain", `entry ${idx} hash ${entry.entry_hash} != recomputed ${head}`);
@@ -475,33 +538,68 @@ function verify(b) {
     ? pass("C. head", head)
     : fail("C. head", `recomputed ${head}, canister says ${b.certified_head.log_head}`);
 
-  // D -- franchise. Every ballot from a roll member, at most one each,
-  // choice in range.
+  // D -- franchise, derived entirely from published credentials. For every
+  // ballot: the key is well-formed, the principal DERIVED from it (never the
+  // one the canister printed) is on the roll and voted once, the choice is in
+  // range, and the signature verifies over (this canister, our manifest hash,
+  // the recorded choice). This is the check that used to be impossible: the
+  // old log recorded callers, and only the canister ever saw those.
+  const canisterBytes = principalToBytes(b.canister);
   const rollSet = new Set(asGiven);
   const seen = new Set();
   let franchiseOk = true;
-  for (const entry of b.log) {
-    const v = principalToBytes(entry.voter).toString("hex");
+  b.log.forEach((entry, idx) => {
+    const pubkeyDer = strictHex(entry.voter_pubkey);
+    const sig = strictHex(entry.sig);
+    if (!pubkeyDer || !sig || pubkeyDer.length !== 44 || !pubkeyDer.subarray(0, 12).equals(DER_PREFIX)) {
+      fail("D. franchise", `ballot ${idx} carries a malformed Ed25519 credential`);
+      franchiseOk = false;
+      return;
+    }
+    const derived = principalOfKey(pubkeyDer);
+    const v = derived.toString("hex");
+    if (!derived.equals(principalToBytes(entry.voter))) {
+      fail("D. franchise", `ballot ${idx} names ${entry.voter}, but its key derives another principal`);
+      franchiseOk = false;
+    }
     if (!rollSet.has(v)) {
-      fail("D. franchise", `ballot from ${entry.voter}, who is not on the roll`);
+      fail("D. franchise", `ballot ${idx} is from a key not on the roll`);
       franchiseOk = false;
     }
     if (seen.has(v)) {
-      fail("D. franchise", `${entry.voter} appears more than once in the log`);
+      fail("D. franchise", `the key behind ballot ${idx} appears more than once in the log`);
       franchiseOk = false;
     }
     seen.add(v);
-    if (Number(entry.choice) >= m.options.length) {
+    const choice = Number(entry.choice);
+    if (!Number.isInteger(choice) || choice < 0 || choice >= m.options.length) {
       fail("D. franchise", `choice ${entry.choice} is outside 0..${m.options.length - 1}`);
       franchiseOk = false;
     }
-  }
-  if (franchiseOk) pass("D. franchise", `${b.log.length} of ${b.roll.length} eligible voted`);
+    // The freshness invariant is public: an honest canister enforcing the
+    // signed expiry can never record `at` past it.
+    if (u64(entry.at, `log[${idx}].at`) > u64(entry.sig_expires_at, `log[${idx}].sig_expires_at`)) {
+      fail("D. franchise", `ballot ${idx} was recorded after its signature expired`);
+      franchiseOk = false;
+    }
+    const msg = ballotSigMessage(canisterBytes, mh, choice, u64(entry.sig_expires_at, `log[${idx}].sig_expires_at`));
+    if (!sigVerifies(pubkeyDer, msg, sig)) {
+      fail("D. franchise", `ballot ${idx} has an invalid signature`);
+      franchiseOk = false;
+    }
+  });
+  if (franchiseOk) pass("D. franchise", `${b.log.length} of ${b.roll.length} eligible voted, all signatures verify`);
 
   // E -- the tally, recomputed. This is the number that matters; the
   // canister's get_tally is not consulted.
   const counts = new Array(m.options.length).fill(0n);
-  for (const entry of b.log) counts[Number(entry.choice)] += 1n;
+  for (const entry of b.log) {
+    const c = Number(entry.choice);
+    // Out-of-range choices already failed check D; counting them here would
+    // index off the array and crash on a BigInt/undefined mix, aborting the
+    // run before the verdict line -- exactly what a hostile bulletin wants.
+    if (Number.isInteger(c) && c >= 0 && c < counts.length) counts[c] += 1n;
+  }
   const th = tallyHash(mh, head, counts);
   console.log("");
   console.log(`      ${m.title}`);
@@ -575,8 +673,11 @@ function main() {
   if (file) {
     bulletin = loadFile(file);
   } else if (fetchId !== undefined) {
-    const canister = opt("canister", "poll");
     const dfxOpts = { network: opt("network", "local"), identity: opt("identity") };
+    // dfx happily accepts a canister NAME as transport, but the bulletin's
+    // `canister` field feeds principalToBytes in checks D and G; resolve a
+    // name to its principal up front rather than crashing mid-verification.
+    const canister = resolveCanister(dfxOpts, opt("canister", "poll"));
     bulletin = fetchBulletin(dfxOpts, canister, fetchId);
     if (opt("save")) {
       writeFileSync(opt("save"), JSON.stringify(bulletin, null, 2));
@@ -589,15 +690,27 @@ function main() {
     process.exit(2);
   }
 
-  // The canister principal is needed to look up certified_data in the
-  // certificate tree; without it check G cannot run at all.
-  if (!bulletin.canister) {
-    console.error("bulletin is missing `canister` (the poll canister's principal)");
+  // The canister principal is needed to derive the signed ballot messages
+  // (check D) and to look up certified_data (check G); a name or a missing
+  // value cannot do either, so fail up front with instructions.
+  if (!bulletin.canister || !isPrincipal(bulletin.canister)) {
+    console.error(
+      `bulletin's \`canister\` must be the poll canister's principal id, got ` +
+        `'${bulletin.canister}'. Use \`dfx canister id poll\` and pass --canister.`
+    );
     process.exit(2);
   }
 
   console.log(`ic-vote V0 verifier -- canister ${bulletin.canister}\n`);
-  verify(bulletin);
+  // A bulletin is untrusted input, and a verifier that dies with a stack
+  // trace on hostile data has failed at its one job: whatever verify() ran
+  // before the throw stands, the exception becomes one more failure, and the
+  // RED verdict below still prints.
+  try {
+    verify(bulletin);
+  } catch (e) {
+    fail("verifier", `aborted by malformed bulletin data: ${e.message}`);
+  }
 
   console.log("");
   if (failures > 0) {
@@ -609,6 +722,31 @@ function main() {
       `completed.\n         Not GREEN: see the WARN lines. A verdict is never upgraded past ` +
       `what was\n         actually checked.`
   );
+}
+
+function isPrincipal(text) {
+  try {
+    principalToBytes(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function resolveCanister(opts, canister) {
+  if (isPrincipal(canister)) return canister;
+  const args = ["canister", "id", "--network", opts.network];
+  if (opts.identity) args.push("--identity", opts.identity);
+  args.push(canister);
+  try {
+    return execFileSync("dfx", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  } catch {
+    console.error(
+      `--canister '${canister}' is neither a principal nor a name dfx can resolve on ` +
+        `network '${opts.network}'`
+    );
+    process.exit(2);
+  }
 }
 
 main();

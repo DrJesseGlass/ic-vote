@@ -3,12 +3,13 @@
 //
 // The asymmetry is deliberate. Decoding has to be general because the poll
 // canister's replies are records of records of variants and we must read all
-// of them. Encoding does not: the voter-facing app calls only
-// `cast(nat64, nat32)` and paginated queries over `nat64`, so the encoder
-// supports nat32/nat64 and refuses everything else loudly. Administration
-// (creating elections, uploading rolls, pinning releases) is deliberately
-// CLI-only in V0 -- it is the operation that decides who may vote, and it
-// should not be reachable from a web page a voter can be phished onto.
+// of them. Encoding does not: the voter-facing app calls
+// `cast(nat64, nat32, blob, blob)` and paginated queries over `nat64`, so the
+// encoder supports nat32/nat64/blob and refuses everything else loudly.
+// Administration (creating elections, uploading rolls, pinning releases) is
+// deliberately CLI-only in V0 -- it is the operation that decides who may
+// vote, and it should not be reachable from a web page a voter can be phished
+// onto.
 
 const PRIM = {
   "-1": "null",
@@ -57,12 +58,14 @@ export const POLL_NAMES = [
   "Ok", "Err",
   "Draft", "Open", "Closed",
   "NotFound", "NotAdmin", "WrongPhase", "EmptyRoll", "NoPin", "NotEligible",
-  "AlreadyVoted", "InvalidChoice", "AnonymousCaller", "InvalidInput",
+  "AlreadyVoted", "InvalidChoice", "AnonymousCaller", "InvalidSignature",
+  "SignatureExpired", "InvalidInput",
   "expected", "actual",
   "id", "title", "question", "options", "admin", "phase", "created_at",
   "opened_at", "closed_at", "pin", "roll_size", "ballot_count",
   "manifest_hash", "log_head", "roll_hash", "tally_hash", "counts",
-  "election_id", "seq", "voter", "choice", "at", "entry_hash",
+  "election_id", "seq", "voter", "voter_pubkey", "choice", "at", "sig",
+  "sig_expires_at", "entry_hash",
   "witness", "sibling", "sibling_is_right", "certificate",
   "repo", "commit", "bundle_sha256", "site_canister", "module_sha256",
   "poll_module_sha256", "registry_chain_id", "registry_address",
@@ -106,10 +109,15 @@ function sleb(nBig) {
   }
 }
 
-/// `args` is a list of [type, value] pairs, e.g. [["nat64", 3n]].
+/// `args` is a list of [type, value] pairs, e.g. [["nat64", 3n]] or
+/// [["blob", new Uint8Array([...])]].
 export function encodeArgs(args) {
+  const table = [];
   const types = [];
   const values = [];
+  // `blob` is a constructed type (vec nat8), so it needs a type-table entry;
+  // one entry is shared by every blob argument.
+  let blobIndex = -1;
   for (const [type, value] of args) {
     switch (type) {
       case "nat64": {
@@ -126,6 +134,18 @@ export function encodeArgs(args) {
         values.push(...b);
         break;
       }
+      case "blob": {
+        if (!(value instanceof Uint8Array)) {
+          throw new Error("blob arguments must be Uint8Array");
+        }
+        if (blobIndex < 0) {
+          blobIndex = table.length;
+          table.push([...sleb(VEC), ...sleb(-5)]);
+        }
+        types.push(...sleb(blobIndex));
+        values.push(...leb(value.length), ...value);
+        break;
+      }
       default:
         throw new Error(
           `candid encoder does not support '${type}'. Administrative calls are ` +
@@ -133,7 +153,14 @@ export function encodeArgs(args) {
         );
     }
   }
-  return new Uint8Array([...MAGIC, 0, args.length, ...types, ...values]);
+  return new Uint8Array([
+    ...MAGIC,
+    ...leb(table.length),
+    ...table.flat(),
+    ...leb(args.length),
+    ...types,
+    ...values,
+  ]);
 }
 
 // --- decoding -------------------------------------------------------------
