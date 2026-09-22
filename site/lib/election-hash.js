@@ -19,7 +19,7 @@ import {
   selfAuthenticating,
 } from "./principal.js";
 
-const D_MANIFEST = "ic-vote/v0/manifest";
+const D_MANIFEST = "ic-vote/v0/manifest-trustees";
 const D_ROLL = "ic-vote/v0/roll";
 const D_GENESIS = "ic-vote/v0/log-genesis";
 // "-signed": the entry format changed when ballots became self-credentialed;
@@ -105,9 +105,10 @@ export function manifestHash(m) {
     .text(m.question)
     .u32(m.options.length);
   for (const o of m.options) w.text(o);
+  w.lp(principalToBytes(m.admin)).u32(m.trustees.length);
+  for (const t of m.trustees) w.lp(principalToBytes(t));
   return w
-    .lp(principalToBytes(m.admin))
-    .u64(m.opened_at)
+    .u32(m.threshold)
     .hash(m.roll_hash)
     .text(m.pin.repo)
     .text(m.pin.commit)

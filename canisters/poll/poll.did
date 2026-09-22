@@ -1,3 +1,25 @@
+// The state of a stage's approvals, against the subject *as it stands now*.
+// 
+// The subject moves whenever what it hashes moves: editing a draft's roll
+// changes the manifest hash, and a ballot landing changes the tally hash.
+// Approvals are bound to the subject they were cast on, so a change after
+// approval voids the approval without anyone having to notice. That is the
+// point: a trustee never approves "whatever the administrator opens", they
+// approve these bytes.
+type Approvals = record {
+  reached : bool;
+  // 64-hex: the manifest hash (`Open`) or the tally hash (`Close`) the
+  // ballots below were cast on. Recompute it; do not trust it.
+  subject : text;
+  // Every trustee's latest decision on this subject. Ballots on earlier
+  // values of the subject are not shown; they no longer count.
+  ballots : vec TrusteeBallot;
+  election_id : nat64;
+  stage : Stage;
+  rejections : nat32;
+  required : nat32;
+  approvals : nat32;
+};
 type BallotView = record {
   at : nat64;
   seq : nat64;
@@ -48,6 +70,8 @@ type ElectionView = record {
   admin : principal;
   closed_at : opt nat64;
   question : text;
+  // How many of them must. Zero: the administrator alone opens and closes.
+  threshold : nat32;
   opened_at : opt nat64;
   // 64-hex head of the ballot log.
   log_head : text;
@@ -55,22 +79,32 @@ type ElectionView = record {
   roll_size : nat64;
   // 64-hex. `None` until the election opens and the manifest freezes.
   manifest_hash : opt text;
+  // Sorted. Who may approve the opening and the count.
+  trustees : vec principal;
   phase : Phase;
   options : vec text;
 };
 // Exactly the fields that go into `manifest_hash`, so a client can recompute
 // it rather than believe the canister's copy.
+// 
+// Available from the moment a draft has a roll and a pin, not only once the
+// election is open: a trustee asked to approve the manifest hash must be
+// able to read the preimage. Until the election opens, `manifest_hash` is
+// the value `open_election` *would* freeze from the draft as it stands;
+// `ElectionView.manifest_hash` stays `None` until it actually has.
 type Manifest = record {
   id : nat64;
   pin : Pin;
   title : text;
   admin : principal;
   question : text;
-  opened_at : nat64;
+  threshold : nat32;
   // 64-hex over the sorted roll.
   roll_hash : text;
   // 64-hex. Advisory: recompute it, do not trust it.
   manifest_hash : text;
+  // Sorted.
+  trustees : vec principal;
   options : vec text;
 };
 type NewElection = record { title : text; question : text; options : vec text };
@@ -136,15 +170,26 @@ type Receipt = record {
   election_id : nat64;
   choice : nat32;
 };
-type Result = variant { Ok : Receipt; Err : VoteError };
-type Result_1 = variant { Ok : CertifiedHead; Err : VoteError };
-type Result_2 = variant { Ok : ElectionView; Err : VoteError };
-type Result_3 = variant { Ok : nat64; Err : VoteError };
-type Result_4 = variant { Ok : vec BallotView; Err : VoteError };
-type Result_5 = variant { Ok : Manifest; Err : VoteError };
-type Result_6 = variant { Ok : vec principal; Err : VoteError };
-type Result_7 = variant { Ok : Tally; Err : VoteError };
-type Result_8 = variant { Ok; Err : VoteError };
+type Result = variant { Ok : Approvals; Err : VoteError };
+type Result_1 = variant { Ok : Receipt; Err : VoteError };
+type Result_10 = variant { Ok; Err : VoteError };
+type Result_2 = variant { Ok : CertifiedHead; Err : VoteError };
+type Result_3 = variant { Ok : ElectionView; Err : VoteError };
+type Result_4 = variant { Ok : nat64; Err : VoteError };
+type Result_5 = variant { Ok : vec Approvals; Err : VoteError };
+type Result_6 = variant { Ok : vec BallotView; Err : VoteError };
+type Result_7 = variant { Ok : Manifest; Err : VoteError };
+type Result_8 = variant { Ok : vec principal; Err : VoteError };
+type Result_9 = variant { Ok : Tally; Err : VoteError };
+// Which lifecycle step a trustee is approving.
+// 
+// Each stage names a subject -- a hash the canister already computes and
+// publishes -- so a trustee approves bytes a verifier can recompute, not a
+// step label. `Open` approves the manifest hash: the question, options,
+// roll, pin and trustee policy the window will freeze. `Close` approves the
+// tally hash: manifest, log head and counts as they stand. A trustee who
+// approves the close is attesting the count, not just the timing.
+type Stage = variant { Open; Close };
 type Tally = record {
   ballot_count : nat64;
   // 64-hex over (manifest, log head, counts). The value to checkpoint.
@@ -159,6 +204,10 @@ type Tally = record {
   counts : vec nat64;
   options : vec text;
 };
+// One trustee's recorded decision on a stage. Published, like every other
+// record here: a trustee's attestation of the count is only worth something
+// if the count's readers can see who gave it.
+type TrusteeBallot = record { at : nat64; trustee : principal; approve : bool };
 type VoteError = variant {
   AlreadyVoted;
   InvalidChoice;
@@ -172,8 +221,14 @@ type VoteError = variant {
   // `InvalidSignature` so a voter whose ballot sat too long gets "sign a
   // fresh one", not "your key is wrong".
   SignatureExpired;
+  // The stage's subject has fewer trustee approvals than the manifest
+  // requires. Counts are against the subject as it stands now, so this
+  // can follow a full set of approvals if the subject moved since.
+  NotApproved : record { required : nat32; approvals : nat32 };
   EmptyRoll;
   NotEligible;
+  // The caller is not in the election's trustee list.
+  NotTrustee;
   AnonymousCaller;
 };
 type WitnessStep = record {
@@ -182,6 +237,20 @@ type WitnessStep = record {
   sibling_is_right : bool;
 };
 service : () -> {
+  // A trustee's decision on a stage: approve (or reject) the manifest hash
+  // (`Open`) or the tally hash (`Close`) as it stands right now.
+  // 
+  // The caller is the trustee. That is the whole credential: the IC has
+  // authenticated the envelope, the caller's principal is looked up in the
+  // manifest's trustee list, and no signature travels inside the call. This
+  // is ic-multisig's authenticated flavour, the same one ic-git's voters use.
+  // The signed flavour is reserved for the other K-of-N in this design --
+  // independent verifiers attesting `Pin.poll_module_sha256`, whose approvals
+  // must be checkable by a browser that never talks to this canister.
+  // 
+  // A later call by the same trustee replaces their earlier ballot. Returns
+  // the stage's approvals after recording.
+  approve : (nat64, Stage, bool) -> (Result);
   // Cast one ballot, credentialed by an in-ballot signature rather than by the
   // message envelope.
   // 
@@ -200,7 +269,7 @@ service : () -> {
   // refused, and it may not lie more than `state::MAX_SIG_TTL_NS` ahead of
   // subnet time. This is the freshness bound the ingress envelope used to
   // provide, relocated into the ballot itself.
-  cast : (nat64, nat32, blob, blob, nat64) -> (Result);
+  cast : (nat64, nat32, blob, blob, nat64) -> (Result_1);
   // The log head, its Merkle witness, and the IC state certificate.
   // 
   // This is the one read that does not require trusting the replying replica:
@@ -211,24 +280,38 @@ service : () -> {
   // only populated in query context. A client that gets `None` has an
   // unverified head and must say so; treating it as verified is the false-GREEN
   // failure ic-git's attestation doctrine forbids.
-  certified_head : (nat64) -> (Result_1) query;
-  close_election : (nat64) -> (Result_2);
-  create_election : (NewElection) -> (Result_3);
-  get_election : (nat64) -> (Result_2) query;
-  get_log : (nat64, nat64, nat64) -> (Result_4) query;
+  certified_head : (nat64) -> (Result_2) query;
+  // Refused with `NotApproved` until `threshold` trustees have approved the
+  // tally hash as it stands. A ballot landing after their approval moves the
+  // hash and voids the approvals, so a closed election's count is one its
+  // trustees actually saw.
+  close_election : (nat64) -> (Result_3);
+  create_election : (NewElection) -> (Result_4);
+  // The trustee ballots on each stage's current subject, and whether the
+  // threshold is met. Public, like the ballot log: a trustee's attestation of
+  // the count is only worth something if the count's readers can see it.
+  // A stage whose subject does not exist yet (`Close` before the manifest is
+  // frozen; both before the draft has a roll and a pin) is simply absent.
+  get_approvals : (nat64) -> (Result_5) query;
+  get_election : (nat64) -> (Result_3) query;
+  get_log : (nat64, nat64, nat64) -> (Result_6) query;
   // The exact preimage of `manifest_hash`. Returned so a client can recompute
-  // the hash instead of accepting the canister's word for it.
-  get_manifest : (nat64) -> (Result_5) query;
-  get_roll : (nat64, nat64, nat64) -> (Result_6) query;
+  // the hash instead of accepting the canister's word for it. Available as
+  // soon as a draft has a roll and a pin, so trustees can read what they are
+  // asked to approve; `EmptyRoll` or `NoPin` before that.
+  get_manifest : (nat64) -> (Result_7) query;
+  get_roll : (nat64, nat64, nat64) -> (Result_8) query;
   // Convenience only. The tally that matters is the one a verifier recomputes
   // from `get_log` (see `tools/verify-election.mjs`); this endpoint exists so a
   // UI can render a number, and a client that displays it without recomputing
   // it is trusting exactly the party E2E-V exists to distrust.
-  get_tally : (nat64) -> (Result_7) query;
+  get_tally : (nat64) -> (Result_9) query;
   list_elections : () -> (vec ElectionView) query;
-  open_election : (nat64) -> (Result_2);
+  // Refused with `NotApproved` until `threshold` trustees have approved the
+  // manifest hash the draft would freeze.
+  open_election : (nat64) -> (Result_3);
   // Pin the frontend release voters must be running. Draft only.
-  pin_release : (nat64, Pin) -> (Result_8);
+  pin_release : (nat64, Pin) -> (Result_10);
   // Replace the eligibility roll. Draft only. Returns the deduplicated size.
   // 
   // This is the T4 trust boundary in THREAT_MODEL.md: whoever calls this
@@ -236,6 +319,10 @@ service : () -> {
   // The roll is published (`get_roll`) and committed to by the manifest hash
   // precisely so the organization's members can audit the list they were
   // enrolled in.
-  set_roll : (nat64, vec principal) -> (Result_3);
+  set_roll : (nat64, vec principal) -> (Result_4);
+  // Name the trustees and how many must approve each stage. Draft only.
+  // Returns the deduplicated size. Threshold zero (the default for every
+  // election) keeps the administrator-only behaviour.
+  set_trustees : (nat64, vec principal, nat32) -> (Result_4);
   whoami : () -> (principal) query;
 }

@@ -36,6 +36,10 @@ trap 'rm -rf "$KEYDIR"' EXIT
 # identity, because an administrator who can also upgrade the canister is not
 # the "availability only" party THREAT_MODEL.md T6 describes.
 ADMIN="${ADMIN_IDENTITY:-icvote-localtest-admin}"
+# The trustee is a third party, distinct from both: the point of the trustee
+# gate is that the administrator cannot open the window or publish the count
+# alone. A trustee that is the admin under another name demonstrates nothing.
+TRUSTEE="${TRUSTEE_IDENTITY:-icvote-localtest-trustee}"
 
 say() { printf '\n\033[1m== %s\033[0m\n' "$1"; }
 call() { dfx canister call --network "$NETWORK" --identity "$1" poll "${@:2}"; }
@@ -59,13 +63,17 @@ cast() { node "$HERE/cast-ballot.mjs" cast --canister "$CID" --host "$HOST" "$@"
 
 # The admin stays a dfx identity: administration is envelope-authenticated,
 # and that is correct -- it is the ballots that must not be.
-if ! dfx identity get-principal --identity "$ADMIN" </dev/null >/dev/null 2>&1; then
-  dfx identity new --storage-mode plaintext "$ADMIN" </dev/null >/dev/null 2>&1
-fi
+for who in "$ADMIN" "$TRUSTEE"; do
+  if ! dfx identity get-principal --identity "$who" </dev/null >/dev/null 2>&1; then
+    dfx identity new --storage-mode plaintext "$who" </dev/null >/dev/null 2>&1
+  fi
+done
 CID="$(dfx canister id --network "$NETWORK" --identity "$ADMIN" poll)"
+TRUSTEE_P="$(dfx identity get-principal --identity "$TRUSTEE" </dev/null)"
 
 say "participants"
 echo "  admin    $ADMIN"
+echo "  trustee  $TRUSTEE  $TRUSTEE_P"
 declare -a P
 # voter-3 is enrolled but casts only the deliberately-mismatched ballot at the
 # end: every earlier refusal (NotEligible, AlreadyVoted, InvalidChoice) fires
@@ -114,6 +122,18 @@ call "$ADMIN" pin_release \
       registry_address = \"0xa1362DAda583c56a395D305a8C7A458E0B62A209\";
    })"
 
+say "name the trustee who must approve the opening and the count"
+# One trustee, threshold one: the smallest policy that is not "admin alone".
+# The list and the threshold go into the manifest hash, so a voter's client
+# checks the same commitment the trustee approved.
+call "$ADMIN" set_trustees "($ID:nat64, vec { principal \"$TRUSTEE_P\" }, 1:nat32)"
+
+say "the administrator tries to open without the trustee (must be refused)"
+call "$ADMIN" open_election "($ID:nat64)" || true
+
+say "the trustee approves the manifest hash"
+call "$TRUSTEE" approve "($ID:nat64, variant { Open }, true)"
+
 say "open the voting window"
 call "$ADMIN" open_election "($ID:nat64)"
 
@@ -135,6 +155,12 @@ cast --key "$KEYDIR/voter-1.key" --election "$ID" --choice 99 || true
 
 say "a signature over a different choice than submitted (must be refused)"
 cast --key "$KEYDIR/voter-3.key" --election "$ID" --choice 0 --sign-choice 1 || true
+
+say "the administrator tries to close without the trustee (must be refused)"
+call "$ADMIN" close_election "($ID:nat64)" || true
+
+say "the trustee approves the tally hash, attesting the count"
+call "$TRUSTEE" approve "($ID:nat64, variant { Close }, true)"
 
 say "close"
 call "$ADMIN" close_election "($ID:nat64)"

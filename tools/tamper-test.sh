@@ -79,6 +79,15 @@ expect_red "repoint the election at another bundle"  "b.manifest.pin.bundle_sha2
 expect_red "swap the pinned module hash"             "b.manifest.pin.module_sha256 = 'e'.repeat(64)"
 expect_red "reword the question after the fact"      "b.manifest.question = 'Which rung is easiest?'"
 expect_red "rename an option after the fact"         "b.manifest.options[0] = 'Something else entirely'"
+# The trustee policy is inside the manifest hash: neither the list nor the
+# threshold can be edited after the trustees approved it.
+expect_red "add a trustee after the fact"            "b.manifest.trustees.push(OUTSIDER)"
+expect_red "lower the trustee threshold after the fact" "b.manifest.threshold = 0"
+# And the attestation itself: an approval must come from a listed trustee
+# and be on the tally hash the verifier recomputes, not on some other bytes.
+# These need an election that required trustees; demo-election.sh does.
+expect_red "forge a trustee approval from an outsider" "b.approvals.ballots[0].trustee = OUTSIDER"
+expect_red "point the trustee approvals at another tally" "b.approvals.subject = flipHex(b.approvals.subject)"
 expect_red "forge the head to match a forged log"    "b.log.pop(); b.certified_head.log_head = b.log[b.log.length-1].entry_hash; b.certified_head.ballot_count = String(b.log.length)"
 
 echo ""
