@@ -7,7 +7,7 @@
 //! check the logic without a replica and without trusting a deployment.
 
 use candid::{CandidType, Principal};
-use ic_multisig::{Approval, Approver, Decision, Policy, Subject};
+use ic_multisig::{Approval, Approver, Ballots, Decision, Policy, Subject};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
@@ -197,10 +197,20 @@ impl Election {
             .unwrap_or_default()
     }
 
+    /// Count the trustee ballots on `subject`. They came out of the map
+    /// `record` writes, and each was checked on the way in: the trustee was
+    /// the authenticated caller of `approve`, and there is no signature to
+    /// verify. The crate is told so, rather than asked to re-verify a list
+    /// that has nothing to verify.
+    fn count(&self, subject: &Subject, ballots: &[Approval]) -> ic_multisig::Tally {
+        let checked = Ballots::assume_checked(subject, ballots.iter().cloned());
+        ic_multisig::tally_checked(&self.policy(), subject, &checked)
+    }
+
     pub fn approvals(&self, stage: Stage) -> Result<Approvals, VoteError> {
         let subject = self.subject(stage)?;
         let ballots = self.approvals_on(&subject);
-        let t = ic_multisig::tally(&self.policy(), ballots);
+        let t = self.count(&subject, ballots);
         Ok(Approvals {
             election_id: self.id,
             stage,
@@ -242,7 +252,7 @@ impl Election {
             return Ok(());
         }
         let subject = self.subject(stage)?;
-        let t = ic_multisig::tally(&self.policy(), self.approvals_on(&subject));
+        let t = self.count(&subject, self.approvals_on(&subject));
         if t.reached {
             Ok(())
         } else {

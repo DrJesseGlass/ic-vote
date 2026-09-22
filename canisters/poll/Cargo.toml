@@ -19,10 +19,11 @@ crate-type = ["cdylib", "lib"]
 #
 # ic-multisig is the one non-cryptographic addition: the K-of-N rule set
 # (policy, one ballot per approver, threshold reached or not) that trustees
-# use to gate opening and closing. It is shared with ic-git, pinned to the
-# same tag ic-git pins, and pulls in nothing this list does not already have
-# (sha2, hex, serde, candid). Sharing it means a reviewer who has read it
-# for one project has read it for both.
+# use to gate opening and closing. It is shared with ic-git, taken from
+# crates.io at the same version ic-git uses (Cargo.lock pins the version and
+# the registry checksum), and pulls in nothing this list does not already
+# have (sha2, hex, serde, candid). Sharing it means a reviewer who has read
+# it for one project has read it for both.
 [dependencies]
 ic-cdk = "0.20"
 candid = "0.10"
@@ -30,4 +31,4 @@ serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 hex = "0.4"
 ed25519-dalek = { version = "2", default-features = false }
-ic-multisig = { git = "https://github.com/DrJesseGlass/ic-multisig", tag = "v0.1.0", features = ["candid"] }
+ic-multisig = { version = "0.1", features = ["candid"] }
