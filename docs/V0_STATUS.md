@@ -178,8 +178,8 @@ canister already published and every verifier already recomputed; a trustee
 approves bytes, not a step label, and a trustee who approves the close is
 attesting the count. The rules -- who counts, one ballot per trustee, later
 ballots replacing earlier ones, threshold reached or not -- are the
-[`ic-multisig`](https://github.com/DrJesseGlass/ic-multisig) crate, the same
-code ic-git's voters use to gate its deploy queue, pinned to the same tag.
+[`ic-multisig`](https://crates.io/crates/ic-multisig) crate, the same
+code ic-git's voters use to gate its deploy queue, at the same version.
 The trustee is the caller of `approve`; the IC authenticates the envelope,
 and no signature travels in the call (the crate's *authenticated* flavour).
 
