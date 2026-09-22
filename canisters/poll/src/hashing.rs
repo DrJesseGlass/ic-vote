@@ -23,7 +23,11 @@ use sha2::{Digest, Sha256};
 
 pub type Hash = [u8; 32];
 
-const D_MANIFEST: &[u8] = b"ic-vote/v0/manifest";
+// "-trustees", not the original "manifest": the field set changed when the
+// trustee policy entered the hash and `opened_at` left it (see
+// `ManifestFields`), and the log-entry domain below explains why a format
+// change must move the domain string with it.
+const D_MANIFEST: &[u8] = b"ic-vote/v0/manifest-trustees";
 const D_ROLL: &[u8] = b"ic-vote/v0/roll";
 const D_GENESIS: &[u8] = b"ic-vote/v0/log-genesis";
 // "-signed", not the original "log-entry": the entry's field set changed when
@@ -105,14 +109,29 @@ pub fn roll_hash(principals: &[&[u8]]) -> Hash {
 /// Fields frozen when an election opens. Everything a voter needs in order to
 /// know *which* election their ballot is in, including the provenance pin --
 /// so the pin cannot be swapped mid-window without changing every subsequent
-/// log entry.
+/// log entry -- and the trustee policy, so who must approve the opening and
+/// the count is fixed by the same hash voters already check.
+///
+/// Deliberately a function of the draft alone: nothing here is decided at the
+/// moment of opening. That is what lets trustees approve the manifest hash
+/// *before* the window opens and lets `open` refuse until they have. An
+/// earlier version hashed `opened_at`, which made the hash unknowable until
+/// the very call it was supposed to gate. Nothing was lost by removing it:
+/// `id` already makes two elections on one canister distinct, and the signed
+/// ballot message binds the canister principal, so no ballot can move between
+/// elections or canisters (`ballot_sig_message`). The opening time is still
+/// published, in `ElectionView`; it is lifecycle metadata, not a commitment.
 pub struct ManifestFields<'a> {
     pub id: u64,
     pub title: &'a str,
     pub question: &'a str,
     pub options: &'a [String],
     pub admin: &'a [u8],
-    pub opened_at: u64,
+    /// Sorted and deduplicated principals, like the roll.
+    pub trustees: &'a [&'a [u8]],
+    /// How many trustees must approve. Zero means the administrator alone
+    /// opens and closes, which is what every election before trustees did.
+    pub threshold: u32,
     pub roll_hash: Hash,
     pub pin_repo: &'a str,
     pub pin_commit: &'a str,
@@ -133,8 +152,11 @@ pub fn manifest_hash(m: &ManifestFields) -> Hash {
     for o in m.options {
         w.text(o);
     }
-    w.bytes(m.admin)
-        .u64(m.opened_at)
+    w.bytes(m.admin).u32(m.trustees.len() as u32);
+    for t in m.trustees {
+        w.bytes(t);
+    }
+    w.u32(m.threshold)
         .hash(&m.roll_hash)
         .text(m.pin_repo)
         .text(m.pin_commit)
@@ -361,7 +383,8 @@ mod tests {
                 question: "q",
                 options: opts,
                 admin: &[1, 2, 3],
-                opened_at: 0,
+                trustees: &[],
+                threshold: 0,
                 roll_hash: h(0),
                 pin_repo: "r",
                 pin_commit: "c",
@@ -374,6 +397,38 @@ mod tests {
             })
         };
         assert_ne!(mk(&a), mk(&b));
+    }
+
+    #[test]
+    fn trustee_list_is_length_prefixed_and_counted() {
+        // Same attack as above, on the trustee list: bytes must not slide
+        // between two trustees, and a list of one must not hash like the
+        // concatenation of two.
+        let opts = vec!["x".to_string(), "y".to_string()];
+        let mk = |trustees: &[&[u8]], threshold: u32| {
+            manifest_hash(&ManifestFields {
+                id: 1,
+                title: "t",
+                question: "q",
+                options: &opts,
+                admin: &[1, 2, 3],
+                trustees,
+                threshold,
+                roll_hash: h(0),
+                pin_repo: "r",
+                pin_commit: "c",
+                pin_bundle_sha256: "b",
+                pin_site_canister: "s",
+                pin_module_sha256: "m",
+                pin_poll_module_sha256: "p",
+                pin_registry_chain_id: 1,
+                pin_registry_address: "0x0",
+            })
+        };
+        assert_ne!(mk(&[b"ab", b"c"], 1), mk(&[b"a", b"bc"], 1));
+        assert_ne!(mk(&[b"abc"], 1), mk(&[b"ab", b"c"], 1));
+        assert_ne!(mk(&[b"ab", b"c"], 1), mk(&[b"ab", b"c"], 2));
+        assert_ne!(mk(&[], 0), mk(&[b"ab"], 0));
     }
 
     #[test]

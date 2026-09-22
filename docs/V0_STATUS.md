@@ -37,12 +37,13 @@ radius is one file. That is the bet, stated so it can be judged.
 | Piece | Where | Evidence |
 |---|---|---|
 | Election lifecycle, roll, one-ballot-per-credential | `canisters/poll/src/state.rs` | 35 unit tests |
+| Trustee K-of-N gate on opening and closing (the `ic-multisig` crate, shared with ic-git) | `state.rs::set_trustees`, `approve`, `open`, `close` | `opening_waits_for_k_trustees_to_approve_the_manifest`, `closing_waits_for_trustees_to_attest_the_count`; check H in `tools/verify-election.mjs`; 4 tamper cases |
 | Domain-separated, length-prefixed hash rules | `canisters/poll/src/hashing.rs` | property tests over every tree shape |
-| Manifest freezing (question, options, roll, pin) at open | `state.rs::open` | `roll_and_pin_are_frozen_once_open` |
+| Manifest freezing (question, options, roll, pin, trustees) at open | `state.rs::open` | `roll_and_pin_are_frozen_once_open`, `manifest_is_readable_in_draft_and_is_what_open_freezes` |
 | Hash-chained public ballot log + voter receipt | `state.rs::cast` | `log_chain_is_recomputable_from_the_published_log` |
 | Caller-blind cast: in-ballot Ed25519 credential, single-use transport key (THREAT_MODEL.md 2.7) | `state.rs::cast`, `credential.rs`, `site/app.js::onCast` | `franchise_is_recomputable_from_the_published_log`; live test asserts the receipt names the credential, not the transport |
 | Merkle root over elections in `certified_data` | `state.rs::certified_root` | `witness_ties_each_election_to_the_certified_root` |
-| Independent CLI verifier (2nd implementation) | `tools/verify-election.mjs` | 18 tamper cases in `tools/tamper-test.sh` |
+| Independent CLI verifier (2nd implementation) | `tools/verify-election.mjs` | 22 tamper cases in `tools/tamper-test.sh` |
 | Hand-written IC agent (CBOR, candid, Ed25519) | `site/lib/` | live-replica tests |
 | Browser-side board recomputation (3rd implementation) | `site/lib/election-hash.js` | agrees with canister + CLI on live data |
 | GREEN/YELLOW/RED verdict rules | `site/lib/verifier.js` | 17 rule tests |
@@ -61,8 +62,12 @@ Run it all: `tools/check.sh --live`.
   changed their mind -- which is precisely the voter it is meant to protect.
 - **Administrative calls from the browser.** `site/lib/candid.js` encodes only
   `nat32`/`nat64`/`blob` and refuses everything else. Creating elections,
-  uploading rolls and pinning releases decide *who may vote*, and should not be
-  reachable from a page a voter can be phished onto. They are CLI operations.
+  uploading rolls, pinning releases and naming trustees decide *who may vote*
+  and *who may certify the count*, and should not be reachable from a page a
+  voter can be phished onto. They are CLI operations. So is a trustee's
+  `approve`: it takes a variant and a bool, which the encoder also refuses,
+  and `get_approvals` takes only the election id so the page can still
+  *read* the trustee record without the encoder growing to write it.
 
 ## Stubbed, and what the stub does
 
@@ -160,6 +165,82 @@ real deployments, so a run of the test suite could either mint a plaintext copy
 of a production-sounding key or silently deploy under an operator's real one.
 `tools/check.sh` deploys only to a local replica it wipes; it is not a
 deployment tool.
+
+## Trustees: the K-of-N that is built, and the one that is not
+
+There are two K-of-N approvals in this design, and only one of them exists.
+
+**Built: trustees gating the election lifecycle.** An election's manifest
+names a list of trustees and a threshold K. The administrator cannot open the
+window until K trustees have approved the **manifest hash**, and cannot close
+it until K trustees have approved the **tally hash**. Both are hashes this
+canister already published and every verifier already recomputed; a trustee
+approves bytes, not a step label, and a trustee who approves the close is
+attesting the count. The rules -- who counts, one ballot per trustee, later
+ballots replacing earlier ones, threshold reached or not -- are the
+[`ic-multisig`](https://github.com/DrJesseGlass/ic-multisig) crate, the same
+code ic-git's voters use to gate its deploy queue, pinned to the same tag.
+The trustee is the caller of `approve`; the IC authenticates the envelope,
+and no signature travels in the call (the crate's *authenticated* flavour).
+
+What that establishes, stated exactly:
+
+- The trustee list and threshold are **inside the manifest hash**, so the
+  policy a voter's client checks is the policy the trustees approved. Editing
+  either after the fact is a RED at check B, like editing the question.
+- Approvals bind to the subject as it stood. Edit the draft's roll after a
+  trustee approved the manifest, or let one more ballot land after the
+  trustees approved the count, and the approvals stop counting: the subject
+  moved. `close_election` is refused until the trustees have looked at the
+  count that will actually be published. Nobody attests a count they did not
+  see.
+- Threshold zero, the default for every election, is the previous behaviour:
+  administrator alone. Existing tooling and elections are unaffected.
+- The trustee ballots are public (`get_approvals`), and both verifiers count
+  them from the published record against their **own** recomputed tally hash
+  and their own reading of the manifest, never from the canister's summary.
+  A closed election whose count fewer than K trustees approved is a FAIL at
+  check H.
+
+What it does **not** establish:
+
+- That the trustee record is genuine. These are the crate's *authenticated*
+  approvals: the IC authenticated each trustee's envelope when it was cast,
+  but the stored ballot carries no signature, and `certified_data` commits to
+  `(id, manifest_hash, log_head, ballot_count)` -- not to the trustee record.
+  A dishonest canister can therefore serve a trustee record it invented, and
+  check H would pass it. Check H catches an *inconsistent bulletin* --
+  approvals on some other tally, a ballot from an outsider, a missing quorum
+  -- not a lying canister, and its PASS line says so. Making it independently
+  checkable needs either the crate's *signed* flavour or the record inside
+  `certified_data`; neither is built.
+- That the *opening* was approved. Both verifiers read only the `Close`
+  stage, so the manifest gate is enforced by the canister alone and is not
+  recomputed anywhere.
+- Who the trustees are. The administrator names them, in Draft, exactly as
+  they upload the roll. This is the T4 boundary again, published so members
+  can audit it, not removed.
+- Anything about the code. This is not the K-of-N on
+  `Pin.poll_module_sha256`, which remains **unbuilt** (ic-git dependency 2).
+  That one needs the crate's *signed* flavour -- independent verifiers
+  signing a module hash so a browser that never talks to this canister can
+  count them against the keyset in `config.js` -- and the JavaScript tally
+  that both projects will share is on the crate's roadmap, not in this repo.
+  `config.trusted.verifiers` is still empty, and the page still cannot show
+  GREEN.
+
+**One correction recorded here, in the same spirit as the one above.** The
+manifest hash used to include `opened_at`, the time of the `open_election`
+call. That made the hash unknowable until the very call it now gates, so
+trustees could not have approved it in advance. It was removed, and the
+manifest's domain string moved with it (`ic-vote/v0/manifest-trustees`, the
+rule `hashing.rs` states for every format change). Nothing was lost: the
+election id already distinguishes two elections on one canister, and the
+signed ballot message binds the canister principal, so no ballot can move
+between elections or canisters. The opening time is still published in the
+election view; it is lifecycle metadata, not a commitment. The stable-state
+format is v3 and, like v2 before it, refuses to migrate an older state rather
+than publish boards its own verifiers would reject.
 
 ## Known rough edges
 

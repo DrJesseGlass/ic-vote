@@ -86,16 +86,62 @@ fn pin_release(election_id: u64, pin: Pin) -> Result<(), VoteError> {
     with_mut(|s| s.pin_release(caller, election_id, pin))
 }
 
+/// Name the trustees and how many must approve each stage. Draft only.
+/// Returns the deduplicated size. Threshold zero (the default for every
+/// election) keeps the administrator-only behaviour.
+#[ic_cdk::update]
+fn set_trustees(election_id: u64, trustees: Vec<Principal>, threshold: u32) -> Result<u64, VoteError> {
+    let caller = msg_caller();
+    with_mut(|s| s.set_trustees(caller, election_id, trustees, threshold))
+}
+
+/// Refused with `NotApproved` until `threshold` trustees have approved the
+/// manifest hash the draft would freeze.
 #[ic_cdk::update]
 fn open_election(election_id: u64) -> Result<ElectionView, VoteError> {
     let (caller, now) = (msg_caller(), time());
     with_mut(|s| s.open(caller, election_id, now))
 }
 
+/// Refused with `NotApproved` until `threshold` trustees have approved the
+/// tally hash as it stands. A ballot landing after their approval moves the
+/// hash and voids the approvals, so a closed election's count is one its
+/// trustees actually saw.
 #[ic_cdk::update]
 fn close_election(election_id: u64) -> Result<ElectionView, VoteError> {
     let (caller, now) = (msg_caller(), time());
     with_mut(|s| s.close(caller, election_id, now))
+}
+
+// --- trustees -------------------------------------------------------------
+
+/// A trustee's decision on a stage: approve (or reject) the manifest hash
+/// (`Open`) or the tally hash (`Close`) as it stands right now.
+///
+/// The caller is the trustee. That is the whole credential: the IC has
+/// authenticated the envelope, the caller's principal is looked up in the
+/// manifest's trustee list, and no signature travels inside the call. This
+/// is ic-multisig's authenticated flavour, the same one ic-git's voters use.
+/// The signed flavour is reserved for the other K-of-N in this design --
+/// independent verifiers attesting `Pin.poll_module_sha256`, whose approvals
+/// must be checkable by a browser that never talks to this canister.
+///
+/// A later call by the same trustee replaces their earlier ballot. Returns
+/// the stage's approvals after recording.
+#[ic_cdk::update]
+fn approve(election_id: u64, stage: Stage, approve: bool) -> Result<Approvals, VoteError> {
+    let (caller, now) = (msg_caller(), time());
+    with_mut(|s| s.approve(caller, election_id, stage, approve, now))
+}
+
+/// The trustee ballots on each stage's current subject, and whether the
+/// threshold is met. Public, like the ballot log: a trustee's attestation of
+/// the count is only worth something if the count's readers can see it.
+/// A stage whose subject does not exist yet (`Close` before the manifest is
+/// frozen; both before the draft has a roll and a pin) is simply absent.
+#[ic_cdk::query]
+fn get_approvals(election_id: u64) -> Result<Vec<Approvals>, VoteError> {
+    STORE.with(|s| Ok(s.borrow().election(election_id)?.approvals_all()))
 }
 
 // --- voting ---------------------------------------------------------------
@@ -153,17 +199,12 @@ fn list_elections() -> Vec<ElectionView> {
 }
 
 /// The exact preimage of `manifest_hash`. Returned so a client can recompute
-/// the hash instead of accepting the canister's word for it.
+/// the hash instead of accepting the canister's word for it. Available as
+/// soon as a draft has a roll and a pin, so trustees can read what they are
+/// asked to approve; `EmptyRoll` or `NoPin` before that.
 #[ic_cdk::query]
 fn get_manifest(election_id: u64) -> Result<Manifest, VoteError> {
-    STORE.with(|s| {
-        s.borrow()
-            .election(election_id)
-            .and_then(|e| e.manifest().ok_or(VoteError::WrongPhase {
-                expected: "Open or Closed".to_string(),
-                actual: e.phase.name().to_string(),
-            }))
-    })
+    STORE.with(|s| s.borrow().election(election_id)?.manifest())
 }
 
 #[ic_cdk::query]
@@ -236,17 +277,23 @@ fn init() {
 }
 
 /// Stable-state format version, bumped on every incompatible change to
-/// `Store`'s serialization. v2 = signed ballots (pubkey_der, sig,
-/// sig_expires_at in every log entry; "ic-vote/v0/log-entry-signed" chain
-/// rule). The unversioned original format is treated as v1.
+/// `Store`'s serialization. The unversioned original format is treated as
+/// v1. v2 = signed ballots (pubkey_der, sig, sig_expires_at in every log
+/// entry; "ic-vote/v0/log-entry-signed" chain rule). v3 = trustees
+/// (trustees, threshold and approvals on every election; the
+/// "ic-vote/v0/manifest-trustees" manifest rule, which also dropped
+/// `opened_at` from the preimage).
 ///
-/// v1 -> v2 is DELIBERATELY not migratable in place: a v1 ballot has no
-/// credential or signature, and inventing placeholders would publish a board
-/// whose franchise check the project's own verifiers must reject. A v1
-/// canister with live elections stays on v1 code until its elections close;
-/// upgrading requires `--mode reinstall`, which wipes state, and the trap
-/// message below says so instead of pretending the upgrade might work.
-const STATE_FORMAT: u32 = 2;
+/// Neither step is migratable in place, DELIBERATELY. v1 -> v2: a v1 ballot
+/// has no credential or signature, and inventing placeholders would publish a
+/// board whose franchise check the project's own verifiers must reject.
+/// v2 -> v3: a v2 election that is open or closed froze a manifest hash under
+/// the old preimage, and no v3 verifier can recompute it, so every such
+/// board would go RED at check B. A canister with live elections stays on the
+/// code it opened them under until they close; upgrading requires
+/// `--mode reinstall`, which wipes state, and the trap message below says so
+/// instead of pretending the upgrade might work.
+const STATE_FORMAT: u32 = 3;
 
 #[ic_cdk::pre_upgrade]
 fn pre_upgrade() {
@@ -259,17 +306,18 @@ fn pre_upgrade() {
 #[ic_cdk::post_upgrade]
 fn post_upgrade() {
     let (version, store): (u32, Store) = ic_cdk::storage::stable_restore().expect(
-        "stable state is not in the versioned signed-ballot format (v2). If this \
-         canister was running the pre-signature code, its state cannot be \
-         migrated: old ballots carry no credential or signature, so they cannot \
-         appear on a v2 board without failing every verifier. Close or abandon \
-         the old elections and redeploy with `--mode reinstall` (this WIPES all \
-         elections), or keep running the old module until they close.",
+        "stable state is not in the versioned trustee format (v3). Its elections \
+         cannot be migrated: a pre-signature (v1) ballot carries no credential, \
+         and a pre-trustee (v2) manifest hash was frozen under a preimage no v3 \
+         verifier can recompute, so either would fail every verifier on a v3 \
+         board. Close or abandon the old elections and redeploy with \
+         `--mode reinstall` (this WIPES all elections), or keep running the old \
+         module until they close.",
     );
     assert_eq!(
         version, STATE_FORMAT,
         "stable state format is v{version}, this module reads v{STATE_FORMAT}; \
-         refusing to guess at a migration"
+         refusing to guess at a migration (see STATE_FORMAT for why none exists)"
     );
     STORE.with(|s| {
         *s.borrow_mut() = store;

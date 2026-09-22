@@ -7,11 +7,23 @@
 //! check the logic without a replica and without trusting a deployment.
 
 use candid::{CandidType, Principal};
+use ic_multisig::{Approval, Approver, Decision, Policy, Subject};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 
 use crate::credential;
 use crate::hashing::{self, Hash, MerkleStep};
 use crate::types::*;
+
+/// Ceiling on the trustee list. Trustees are hashed into the manifest one by
+/// one, and a policy is a handful of named people, not a roll.
+pub const MAX_TRUSTEES: usize = 256;
+
+/// Ceiling on the values of a stage's subject an election remembers ballots
+/// for. See `TrusteeBallots::save`: without it, a trustee re-approving after
+/// every draft edit or every ballot grows unmigratable heap state one entry
+/// per call, for the same reason `MAX_ROLL` exists.
+pub const MAX_APPROVAL_SUBJECTS: usize = 32;
 
 /// Ceiling on roll size. State lives on the heap and is re-serialized on every
 /// upgrade, so this is a real limit, not a formality: at ~29 bytes per
@@ -53,6 +65,12 @@ pub struct Election {
     pub question: String,
     pub options: Vec<String>,
     pub admin: Principal,
+    /// Sorted and deduplicated, for the same reason the roll is: the manifest
+    /// hashes the list in order.
+    pub trustees: Vec<Principal>,
+    /// How many trustees must approve a stage before the administrator may
+    /// perform it. Zero is the pre-trustee behaviour: admin alone.
+    pub threshold: u32,
     pub phase: Phase,
     pub created_at: u64,
     pub opened_at: Option<u64>,
@@ -68,6 +86,39 @@ pub struct Election {
     /// Sorted. Derivable from `log`, kept separately so the double-vote check
     /// is a binary search rather than a scan of every ballot cast so far.
     pub voted: Vec<Principal>,
+    /// Trustee ballots, keyed by `Subject::key` (`<kind>:<hex hash>`). Kept
+    /// per subject rather than per stage so that when the subject moves --
+    /// the draft is edited, a ballot lands -- the old approvals stay on
+    /// record but stop counting, instead of quietly carrying over to bytes
+    /// nobody approved. Bounded per stage by `MAX_APPROVAL_SUBJECTS`.
+    pub approvals: BTreeMap<String, Vec<Approval>>,
+}
+
+/// The ic-multisig storage adapter: one election's trustee ballots. The rules
+/// (who counts, one ballot per trustee, threshold reached or not) live in the
+/// crate, shared with ic-git; this only supplies the map.
+struct TrusteeBallots<'a>(&'a mut BTreeMap<String, Vec<Approval>>);
+
+impl ic_multisig::Store for TrusteeBallots<'_> {
+    fn load(&self, subject: &Subject) -> Vec<Approval> {
+        self.0.get(&subject.key()).cloned().unwrap_or_default()
+    }
+
+    fn save(&mut self, subject: &Subject, ballots: Vec<Approval>) {
+        let key = subject.key();
+        self.0.insert(key.clone(), ballots);
+        // The subject moves on every draft edit and every ballot cast, and a
+        // trustee may approve each value it takes, so an unbounded map here
+        // is one heap entry per update call -- state no endpoint can read
+        // back once the subject has moved on (`approvals_on` only ever looks
+        // up the current subject) and that v3 refuses to migrate away. Well
+        // above any honest election's churn; past it, the superseded entries
+        // for this stage go and only the current subject is kept.
+        let prefix = format!("{}:", subject.kind);
+        if self.0.keys().filter(|k| k.starts_with(&prefix)).count() > MAX_APPROVAL_SUBJECTS {
+            self.0.retain(|k, _| !k.starts_with(&prefix) || *k == key);
+        }
+    }
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, Default)]
@@ -84,14 +135,24 @@ impl Election {
         hashing::roll_hash(&slices)
     }
 
-    fn manifest_fields<'a>(&'a self, opened_at: u64, pin: &'a Pin) -> hashing::ManifestFields<'a> {
-        hashing::ManifestFields {
+    /// The manifest hash the draft as it stands would freeze, or the one it
+    /// did. Needs a roll and a pin, which are the same preconditions `open`
+    /// has: a manifest with no voters or no pinned release is not a thing a
+    /// trustee should be able to approve.
+    fn compute_manifest_hash(&self) -> Result<Hash, VoteError> {
+        if self.roll.is_empty() {
+            return Err(VoteError::EmptyRoll);
+        }
+        let pin = self.pin.as_ref().ok_or(VoteError::NoPin)?;
+        let trustees: Vec<&[u8]> = self.trustees.iter().map(|p| p.as_slice()).collect();
+        Ok(hashing::manifest_hash(&hashing::ManifestFields {
             id: self.id,
             title: &self.title,
             question: &self.question,
             options: &self.options,
             admin: self.admin.as_slice(),
-            opened_at,
+            trustees: &trustees,
+            threshold: self.threshold,
             roll_hash: self.roll_hash(),
             pin_repo: &pin.repo,
             pin_commit: &pin.commit,
@@ -101,6 +162,94 @@ impl Election {
             pin_poll_module_sha256: &pin.poll_module_sha256,
             pin_registry_chain_id: pin.registry_chain_id,
             pin_registry_address: &pin.registry_address,
+        }))
+    }
+
+    fn tally_hash(&self) -> Option<Hash> {
+        self.manifest_hash
+            .as_ref()
+            .map(|mh| hashing::tally_hash(mh, &self.log_head, &self.counts()))
+    }
+
+    // --- trustee approvals ----------------------------------------------
+
+    fn policy(&self) -> Policy {
+        Policy::new(self.trustees.iter().copied().map(Approver::from), self.threshold)
+    }
+
+    /// What a trustee approves at each stage. Both are hashes the canister
+    /// already publishes and every verifier already recomputes.
+    fn subject(&self, stage: Stage) -> Result<Subject, VoteError> {
+        let hash = match stage {
+            Stage::Open => self.compute_manifest_hash()?,
+            Stage::Close => self.tally_hash().ok_or(VoteError::WrongPhase {
+                expected: "Open or Closed".to_string(),
+                actual: self.phase.name().to_string(),
+            })?,
+        };
+        Ok(Subject::new(stage.kind(), hash))
+    }
+
+    fn approvals_on(&self, subject: &Subject) -> &[Approval] {
+        self.approvals
+            .get(&subject.key())
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    pub fn approvals(&self, stage: Stage) -> Result<Approvals, VoteError> {
+        let subject = self.subject(stage)?;
+        let ballots = self.approvals_on(&subject);
+        let t = ic_multisig::tally(&self.policy(), ballots);
+        Ok(Approvals {
+            election_id: self.id,
+            stage,
+            subject: hex32(&subject.hash),
+            ballots: ballots
+                .iter()
+                .filter_map(|a| {
+                    Some(TrusteeBallot {
+                        trustee: a.approver.principal()?,
+                        approve: a.approves(),
+                        at: a.at_ns,
+                    })
+                })
+                .collect(),
+            approvals: t.approvals,
+            rejections: t.rejections,
+            required: t.required,
+            reached: t.reached,
+        })
+    }
+
+    /// Every stage whose subject exists yet: `Open` once the draft has a
+    /// roll and a pin, `Close` once the manifest is frozen. One call, no
+    /// stage argument, so the ballot page can read it: its candid encoder
+    /// deliberately cannot write a variant, and widening it to select a
+    /// stage would also let the page reach `approve`.
+    pub fn approvals_all(&self) -> Vec<Approvals> {
+        [Stage::Open, Stage::Close]
+            .into_iter()
+            .filter_map(|stage| self.approvals(stage).ok())
+            .collect()
+    }
+
+    /// May the administrator perform this stage? Yes when the manifest
+    /// requires no trustees, or when enough of them have approved the
+    /// subject as it stands right now.
+    fn require_approved(&self, stage: Stage) -> Result<(), VoteError> {
+        if self.threshold == 0 {
+            return Ok(());
+        }
+        let subject = self.subject(stage)?;
+        let t = ic_multisig::tally(&self.policy(), self.approvals_on(&subject));
+        if t.reached {
+            Ok(())
+        } else {
+            Err(VoteError::NotApproved {
+                approvals: t.approvals,
+                required: t.required,
+            })
         }
     }
 
@@ -121,6 +270,8 @@ impl Election {
             question: self.question.clone(),
             options: self.options.clone(),
             admin: self.admin,
+            trustees: self.trustees.clone(),
+            threshold: self.threshold,
             phase: self.phase,
             created_at: self.created_at,
             opened_at: self.opened_at,
@@ -133,40 +284,39 @@ impl Election {
         }
     }
 
-    pub fn manifest(&self) -> Option<Manifest> {
-        let (mh, pin, opened_at) = (
-            self.manifest_hash.as_ref()?,
-            self.pin.as_ref()?,
-            self.opened_at?,
-        );
-        Some(Manifest {
+    /// The manifest preimage. Once open, the frozen hash; before that, the
+    /// hash the draft would freeze -- what a trustee approving `Stage::Open`
+    /// is being asked to sign off on.
+    pub fn manifest(&self) -> Result<Manifest, VoteError> {
+        let mh = match self.manifest_hash {
+            Some(mh) => mh,
+            None => self.compute_manifest_hash()?,
+        };
+        Ok(Manifest {
             id: self.id,
             title: self.title.clone(),
             question: self.question.clone(),
             options: self.options.clone(),
             admin: self.admin,
-            opened_at,
+            trustees: self.trustees.clone(),
+            threshold: self.threshold,
             roll_hash: hex32(&self.roll_hash()),
-            pin: pin.clone(),
-            manifest_hash: hex32(mh),
+            pin: self.pin.clone().expect("a manifest hash implies a pin"),
+            manifest_hash: hex32(&mh),
         })
     }
 
     pub fn tally(&self) -> Tally {
-        let counts = self.counts();
         Tally {
             election_id: self.id,
             phase: self.phase,
             options: self.options.clone(),
-            counts: counts.clone(),
+            counts: self.counts(),
             ballot_count: self.log.len() as u64,
             roll_size: self.roll.len() as u64,
             log_head: hex32(&self.log_head),
             manifest_hash: self.manifest_hash.as_ref().map(hex32),
-            tally_hash: self
-                .manifest_hash
-                .as_ref()
-                .map(|mh| hex32(&hashing::tally_hash(mh, &self.log_head, &counts))),
+            tally_hash: self.tally_hash().as_ref().map(hex32),
         }
     }
 
@@ -260,6 +410,8 @@ impl Store {
             question: spec.question,
             options: spec.options,
             admin: caller,
+            trustees: Vec::new(),
+            threshold: 0,
             phase: Phase::Draft,
             created_at: now,
             opened_at: None,
@@ -270,8 +422,106 @@ impl Store {
             log: Vec::new(),
             log_head: ZERO,
             voted: Vec::new(),
+            approvals: BTreeMap::new(),
         });
         Ok(id)
+    }
+
+    /// Name the trustees and how many must approve. Draft only, like the
+    /// roll and the pin, and for the same reason: it is part of the manifest.
+    ///
+    /// The threshold is checked against the list here, not left to the
+    /// crate's `Policy::validate` at approval time, so a draft can never
+    /// carry -- and a trustee never approve -- a policy no set of trustees
+    /// could satisfy.
+    pub fn set_trustees(
+        &mut self,
+        caller: Principal,
+        id: u64,
+        mut trustees: Vec<Principal>,
+        threshold: u32,
+    ) -> Result<u64, VoteError> {
+        let e = self.get_mut(id)?;
+        e.require_admin(caller)?;
+        e.require_phase(Phase::Draft)?;
+        if trustees.len() > MAX_TRUSTEES {
+            return Err(VoteError::InvalidInput(format!(
+                "trustees exceed MAX_TRUSTEES ({MAX_TRUSTEES})"
+            )));
+        }
+        // The anonymous principal as a trustee would let any unauthenticated
+        // caller cast that trustee's one ballot -- see `set_roll`.
+        if trustees.iter().any(|p| *p == Principal::anonymous()) {
+            return Err(VoteError::InvalidInput(
+                "trustees must not include the anonymous principal".to_string(),
+            ));
+        }
+        trustees.sort();
+        let before = trustees.len();
+        trustees.dedup();
+        if trustees.len() != before {
+            return Err(VoteError::InvalidInput(
+                "trustees contains duplicate principals".to_string(),
+            ));
+        }
+        if threshold as usize > trustees.len() {
+            return Err(VoteError::InvalidInput(format!(
+                "threshold {threshold} exceeds {} trustees",
+                trustees.len()
+            )));
+        }
+        e.trustees = trustees;
+        e.threshold = threshold;
+        Ok(e.trustees.len() as u64)
+    }
+
+    /// Record a trustee's decision on a stage's subject as it stands now.
+    ///
+    /// `Open` may be approved while the election is a draft, since that is
+    /// when the manifest is still being decided and the only time the
+    /// approval can gate anything. `Close` may be approved while the window
+    /// is open -- that is what gates the close -- and also after it has
+    /// closed, because a late attestation of the final count, or a public
+    /// dissent from it, is still worth having on the board.
+    pub fn approve(
+        &mut self,
+        caller: Principal,
+        id: u64,
+        stage: Stage,
+        approve: bool,
+        now: u64,
+    ) -> Result<Approvals, VoteError> {
+        reject_anonymous(caller)?;
+        let e = self.get_mut(id)?;
+        match stage {
+            Stage::Open => e.require_phase(Phase::Draft)?,
+            Stage::Close => {
+                if e.phase == Phase::Draft {
+                    return Err(VoteError::WrongPhase {
+                        expected: "Open or Closed".to_string(),
+                        actual: e.phase.name().to_string(),
+                    });
+                }
+            }
+        }
+        let subject = e.subject(stage)?;
+        let policy = e.policy();
+        let decision = if approve {
+            Decision::Approve
+        } else {
+            Decision::Reject
+        };
+        ic_multisig::record(
+            &mut TrusteeBallots(&mut e.approvals),
+            &policy,
+            &subject,
+            Approval::new(Approver::from(caller), decision, now),
+        )
+        .map_err(|err| match err {
+            ic_multisig::Error::NotAnApprover => VoteError::NotTrustee,
+            other => VoteError::InvalidInput(other.to_string()),
+        })?;
+        e.approvals(stage)
     }
 
     pub fn set_roll(
@@ -325,17 +575,19 @@ impl Store {
     ///
     /// This is the only place `manifest_hash` is ever written, and it is
     /// written exactly once. Everything it commits to -- question, options,
-    /// roll, pin -- becomes immutable here, because the ballot log chains from
-    /// it and rewriting any of it would silently detach every cast ballot.
+    /// roll, pin, trustees -- becomes immutable here, because the ballot log
+    /// chains from it and rewriting any of it would silently detach every
+    /// cast ballot.
+    ///
+    /// When the manifest names a threshold, the hash frozen here is exactly
+    /// the one the trustees approved: `require_approved` counts ballots on
+    /// the hash of the draft as it stands, and that is the hash written.
     pub fn open(&mut self, caller: Principal, id: u64, now: u64) -> Result<ElectionView, VoteError> {
         let e = self.get_mut(id)?;
         e.require_admin(caller)?;
         e.require_phase(Phase::Draft)?;
-        if e.roll.is_empty() {
-            return Err(VoteError::EmptyRoll);
-        }
-        let pin = e.pin.clone().ok_or(VoteError::NoPin)?;
-        let mh = hashing::manifest_hash(&e.manifest_fields(now, &pin));
+        let mh = e.compute_manifest_hash()?;
+        e.require_approved(Stage::Open)?;
         e.manifest_hash = Some(mh);
         e.log_head = hashing::log_genesis(&mh);
         e.opened_at = Some(now);
@@ -343,6 +595,11 @@ impl Store {
         Ok(e.view())
     }
 
+    /// End the voting window. With a threshold, only once enough trustees
+    /// have approved the tally hash as it stands -- which a ballot landing
+    /// after their approval moves, so the approvals lapse and the trustees
+    /// must look at the new count. That is the property wanted: nobody
+    /// attests a count they have not seen.
     pub fn close(
         &mut self,
         caller: Principal,
@@ -352,6 +609,7 @@ impl Store {
         let e = self.get_mut(id)?;
         e.require_admin(caller)?;
         e.require_phase(Phase::Open)?;
+        e.require_approved(Stage::Close)?;
         e.closed_at = Some(now);
         e.phase = Phase::Closed;
         Ok(e.view())
@@ -638,8 +896,9 @@ mod tests {
         s.open(p(1), id_b, 900).unwrap();
 
         let (der, sig) = signed(&s, id_a, 10, 0, 960);
-        // The manifests differ (id, opened_at), so the signature is bound to
-        // election A and must not land in election B.
+        // The manifests differ (by id alone: `opened_at` is not in the
+        // preimage), so the signature is bound to election A and must not
+        // land in election B.
         assert_eq!(
             s.cast(SELF_ID, id_b, 0, der.clone(), sig.clone(), 960, 930),
             Err(VoteError::InvalidSignature)
@@ -918,6 +1177,258 @@ mod tests {
         assert!(matches!(
             s.create(p(1), 1, dup),
             Err(VoteError::InvalidInput(_))
+        ));
+    }
+
+    // --- trustees ---------------------------------------------------------
+
+    /// Draft with trustees p(20), p(21), p(22) and threshold 2, admin p(1).
+    fn drafted_with_trustees(threshold: u32) -> (Store, u64) {
+        let (mut s, id) = drafted();
+        s.set_trustees(p(1), id, vec![p(22), p(20), p(21)], threshold)
+            .unwrap();
+        (s, id)
+    }
+
+    fn approvals(s: &Store, id: u64, stage: Stage) -> (u32, u32, bool) {
+        let a = s.election(id).unwrap().approvals(stage).unwrap();
+        (a.approvals, a.required, a.reached)
+    }
+
+    #[test]
+    fn threshold_zero_is_the_administrator_alone() {
+        // Every other test in this module runs with no trustees: the default
+        // is the pre-trustee behaviour, and this makes that explicit. Naming
+        // trustees with threshold 0 changes nothing about who may open.
+        let (mut s, id) = drafted_with_trustees(0);
+        s.open(p(1), id, 200).unwrap();
+        cast(&mut s, id, 10, 0, 300).unwrap();
+        s.close(p(1), id, 400).unwrap();
+    }
+
+    #[test]
+    fn opening_waits_for_k_trustees_to_approve_the_manifest() {
+        let (mut s, id) = drafted_with_trustees(2);
+        assert_eq!(
+            s.open(p(1), id, 200),
+            Err(VoteError::NotApproved { approvals: 0, required: 2 })
+        );
+        let a = s.approve(p(20), id, Stage::Open, true, 150).unwrap();
+        assert_eq!((a.approvals, a.required, a.reached), (1, 2, false));
+        // What they approved is exactly what the manifest endpoint shows.
+        assert_eq!(a.subject, s.election(id).unwrap().manifest().unwrap().manifest_hash);
+        assert_eq!(
+            s.open(p(1), id, 200),
+            Err(VoteError::NotApproved { approvals: 1, required: 2 })
+        );
+        s.approve(p(21), id, Stage::Open, true, 160).unwrap();
+        let view = s.open(p(1), id, 200).unwrap();
+        // The frozen hash is the one the trustees approved.
+        assert_eq!(view.manifest_hash.unwrap(), a.subject);
+        assert_eq!(approvals(&s, id, Stage::Open), (2, 2, true));
+    }
+
+    #[test]
+    fn editing_the_draft_voids_manifest_approvals() {
+        let (mut s, id) = drafted_with_trustees(1);
+        s.approve(p(20), id, Stage::Open, true, 150).unwrap();
+        assert_eq!(approvals(&s, id, Stage::Open), (1, 1, true));
+        // The administrator changes the roll after the trustee signed off.
+        s.set_roll(p(1), id, vec![voter(10).2]).unwrap();
+        assert_eq!(approvals(&s, id, Stage::Open), (0, 1, false));
+        assert_eq!(
+            s.open(p(1), id, 200),
+            Err(VoteError::NotApproved { approvals: 0, required: 1 })
+        );
+        // Changing the policy itself is also a manifest change.
+        s.set_roll(p(1), id, vec![voter(11).2, voter(10).2]).unwrap();
+        assert_eq!(approvals(&s, id, Stage::Open), (1, 1, true));
+        s.set_trustees(p(1), id, vec![p(20), p(21)], 1).unwrap();
+        assert_eq!(approvals(&s, id, Stage::Open), (0, 1, false));
+    }
+
+    #[test]
+    fn stored_approvals_are_bounded_per_stage() {
+        // The subject moves on every draft edit, and a trustee may approve
+        // each value it takes. Unbounded, that is one permanent heap entry
+        // per update call -- entries no endpoint can read back once the
+        // subject has moved on, in state no upgrade can migrate away.
+        let (mut s, id) = drafted_with_trustees(1);
+        for i in 0..(MAX_APPROVAL_SUBJECTS + 5) {
+            s.set_roll(p(1), id, vec![voter(10).2, voter(100 + i as u8).2])
+                .unwrap();
+            s.approve(p(20), id, Stage::Open, true, 150 + i as u64).unwrap();
+        }
+        assert!(s.election(id).unwrap().approvals.len() <= MAX_APPROVAL_SUBJECTS);
+        // The subject as it stands is always the one kept, so the gate the
+        // bound protects still works.
+        assert_eq!(approvals(&s, id, Stage::Open), (1, 1, true));
+        s.open(p(1), id, 900).unwrap();
+    }
+
+    #[test]
+    fn closing_waits_for_trustees_to_attest_the_count() {
+        let (mut s, id) = drafted_with_trustees(2);
+        // Nothing to attest before the window opens: there is no count yet.
+        assert!(matches!(
+            s.approve(p(20), id, Stage::Close, true, 140),
+            Err(VoteError::WrongPhase { .. })
+        ));
+        s.approve(p(20), id, Stage::Open, true, 150).unwrap();
+        s.approve(p(21), id, Stage::Open, true, 160).unwrap();
+        s.open(p(1), id, 200).unwrap();
+        cast(&mut s, id, 10, 0, 300).unwrap();
+        assert_eq!(
+            s.close(p(1), id, 400),
+            Err(VoteError::NotApproved { approvals: 0, required: 2 })
+        );
+        let a = s.approve(p(20), id, Stage::Close, true, 310).unwrap();
+        assert_eq!(a.subject, s.election(id).unwrap().tally().tally_hash.unwrap());
+        s.approve(p(22), id, Stage::Close, true, 320).unwrap();
+        assert_eq!(approvals(&s, id, Stage::Close), (2, 2, true));
+        // A ballot lands after both approvals: the count they attested is no
+        // longer the count, so the close is refused until they look again.
+        cast(&mut s, id, 11, 1, 330).unwrap();
+        assert_eq!(approvals(&s, id, Stage::Close), (0, 2, false));
+        assert_eq!(
+            s.close(p(1), id, 400),
+            Err(VoteError::NotApproved { approvals: 0, required: 2 })
+        );
+        s.approve(p(20), id, Stage::Close, true, 340).unwrap();
+        s.approve(p(21), id, Stage::Close, true, 350).unwrap();
+        s.close(p(1), id, 400).unwrap();
+        // A late attestation of the final count is still recorded.
+        let a = s.approve(p(22), id, Stage::Close, true, 500).unwrap();
+        assert_eq!((a.approvals, a.reached), (3, true));
+    }
+
+    #[test]
+    fn approvals_are_confined_to_their_stage_and_phase() {
+        let (mut s, id) = drafted_with_trustees(1);
+        assert!(matches!(
+            s.approve(p(20), id, Stage::Close, true, 150),
+            Err(VoteError::WrongPhase { .. })
+        ));
+        s.approve(p(20), id, Stage::Open, true, 150).unwrap();
+        s.open(p(1), id, 200).unwrap();
+        assert!(matches!(
+            s.approve(p(20), id, Stage::Open, true, 250),
+            Err(VoteError::WrongPhase { .. })
+        ));
+        // An approval of the manifest is not an approval of the tally, even
+        // though the same trustee gave it.
+        assert_eq!(approvals(&s, id, Stage::Close), (0, 1, false));
+    }
+
+    #[test]
+    fn only_trustees_approve_and_each_counts_once() {
+        let (mut s, id) = drafted_with_trustees(2);
+        assert_eq!(
+            s.approve(p(1), id, Stage::Open, true, 150),
+            Err(VoteError::NotTrustee)
+        );
+        assert_eq!(
+            s.approve(Principal::anonymous(), id, Stage::Open, true, 150),
+            Err(VoteError::AnonymousCaller)
+        );
+        s.approve(p(20), id, Stage::Open, true, 150).unwrap();
+        s.approve(p(20), id, Stage::Open, true, 151).unwrap();
+        assert_eq!(approvals(&s, id, Stage::Open), (1, 2, false));
+        // A trustee may change their mind, and the later ballot is the one
+        // that counts.
+        let a = s.approve(p(20), id, Stage::Open, false, 152).unwrap();
+        assert_eq!((a.approvals, a.rejections), (0, 1));
+        assert_eq!(a.ballots.len(), 1);
+        assert!(!a.ballots[0].approve);
+        // Nothing here moved anything a trustee should not be able to move.
+        assert_eq!(s.election(id).unwrap().phase, Phase::Draft);
+    }
+
+    #[test]
+    fn approvals_are_public_and_name_the_trustee() {
+        let (mut s, id) = drafted_with_trustees(2);
+        s.approve(p(21), id, Stage::Open, true, 150).unwrap();
+        let a = s.election(id).unwrap().approvals(Stage::Open).unwrap();
+        assert_eq!(
+            a.ballots,
+            vec![TrusteeBallot { trustee: p(21), approve: true, at: 150 }]
+        );
+    }
+
+    #[test]
+    fn trustees_and_threshold_are_bound_into_the_manifest() {
+        let baseline = {
+            let (s, id) = opened();
+            s.election(id).unwrap().manifest_hash
+        };
+        let (mut s, id) = drafted_with_trustees(0);
+        s.open(p(1), id, 200).unwrap();
+        let with_trustees = s.election(id).unwrap().manifest_hash;
+        assert_ne!(baseline, with_trustees);
+
+        let (mut s, id) = drafted_with_trustees(1);
+        s.approve(p(20), id, Stage::Open, true, 150).unwrap();
+        s.open(p(1), id, 200).unwrap();
+        assert_ne!(with_trustees, s.election(id).unwrap().manifest_hash);
+    }
+
+    #[test]
+    fn trustee_order_does_not_change_the_manifest() {
+        let (mut a, ia) = drafted();
+        a.set_trustees(p(1), ia, vec![p(20), p(21)], 0).unwrap();
+        a.open(p(1), ia, 200).unwrap();
+        let (mut b, ib) = drafted();
+        b.set_trustees(p(1), ib, vec![p(21), p(20)], 0).unwrap();
+        b.open(p(1), ib, 200).unwrap();
+        assert_eq!(
+            a.election(ia).unwrap().manifest_hash,
+            b.election(ib).unwrap().manifest_hash
+        );
+    }
+
+    #[test]
+    fn manifest_is_readable_in_draft_and_is_what_open_freezes() {
+        let (mut s, id) = drafted_with_trustees(1);
+        let draft = s.election(id).unwrap().manifest().unwrap();
+        assert_eq!(draft.trustees, vec![p(20), p(21), p(22)]);
+        assert_eq!(draft.threshold, 1);
+        // Not yet frozen, and the certified leaf says so.
+        assert_eq!(s.election(id).unwrap().view().manifest_hash, None);
+        s.approve(p(22), id, Stage::Open, true, 150).unwrap();
+        s.open(p(1), id, 200).unwrap();
+        let frozen = s.election(id).unwrap().manifest().unwrap();
+        assert_eq!(draft.manifest_hash, frozen.manifest_hash);
+        assert_eq!(
+            s.election(id).unwrap().view().manifest_hash,
+            Some(frozen.manifest_hash)
+        );
+    }
+
+    #[test]
+    fn bad_trustee_lists_are_rejected() {
+        let (mut s, id) = drafted();
+        assert!(matches!(
+            s.set_trustees(p(1), id, vec![p(20)], 2),
+            Err(VoteError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            s.set_trustees(p(1), id, vec![p(20), p(20)], 1),
+            Err(VoteError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            s.set_trustees(p(1), id, vec![p(20), Principal::anonymous()], 1),
+            Err(VoteError::InvalidInput(_))
+        ));
+        assert_eq!(
+            s.set_trustees(p(2), id, vec![p(20)], 1),
+            Err(VoteError::NotAdmin)
+        );
+        // No trustees, threshold 0: explicitly allowed, it is the default.
+        assert_eq!(s.set_trustees(p(1), id, vec![], 0), Ok(0));
+        s.open(p(1), id, 200).unwrap();
+        assert!(matches!(
+            s.set_trustees(p(1), id, vec![p(20)], 1),
+            Err(VoteError::WrongPhase { .. })
         ));
     }
 

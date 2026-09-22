@@ -112,19 +112,30 @@ async function selectElection(id) {
   const head = unwrap(await anon.query("certified_head", [["nat64", id]]));
   const roll = await pageAll(anon, "get_roll", id, 10000n);
   const log = await pageAll(anon, "get_log", id, 1000n);
+  // The trustee record: who has attested the manifest and the count.
+  const approvals = unwrap(await anon.query("get_approvals", [["nat64", id]]));
   let manifest = null;
   try {
     manifest = unwrap(await anon.query("get_manifest", [["nat64", id]]));
   } catch {
-    // Draft elections have no frozen manifest yet.
+    // A draft without a roll and a pin has no manifest yet, even a
+    // provisional one.
   }
 
-  const current = { view, manifest, roll, log, head };
+  const current = { view, manifest, roll, log, head, approvals };
   // Recompute the board before verifying provenance: the two are independent,
   // and a voter should see a recomputed tally even on a page that fails its
   // own provenance check. Failing provenance means "do not trust this page to
   // take your vote", not "hide the public record".
-  if (manifest) {
+  //
+  // Only once the election has actually opened, though. `get_manifest` now
+  // answers in Draft too, with the hash `open_election` WOULD freeze -- that
+  // is what trustees approve -- but nothing is committed yet: the canister's
+  // log head is still zero while a board recomputed from a draft manifest
+  // chains from its genesis, and the certified leaf still carries zeros. A
+  // board built on that shows a "recomputed head" and a Merkle root that
+  // disagree with every published value, with no problem to explain why.
+  if (manifest && view.manifest_hash) {
     current.board = await eh.recomputeBoard({
       manifest,
       roll,
@@ -335,7 +346,13 @@ function renderElection() {
       ["Manifest hash", manifest.manifest_hash],
       ["Pinned release", `${manifest.pin.repo} @ ${manifest.pin.commit}`],
       ["Pinned bundle", manifest.pin.bundle_sha256],
-      ["Pinned module", manifest.pin.module_sha256]
+      ["Pinned module", manifest.pin.module_sha256],
+      [
+        "Trustees",
+        manifest.threshold === 0
+          ? "none required; the administrator opens and closes alone"
+          : `${manifest.threshold} of ${manifest.trustees.length} must approve the opening and the count`,
+      ]
     );
   }
   $("election-facts").replaceChildren(
@@ -497,12 +514,26 @@ function renderBoard() {
   const leaf = eh.merkleLeaf(manifest.id, board.manifestHash, board.logHead, head.ballot_count);
   const root = eh.merkleRecompute(leaf, head.witness);
 
+  // Trustee attestation of the count, counted from the published ballots
+  // against OUR tally hash and the manifest's own trustee list -- the
+  // canister's `approvals`/`reached` summary is not consulted, for the same
+  // reason get_tally is not.
+  const closing = (state.current.approvals ?? []).find((a) => "Close" in a.stage) ?? null;
+  const trusteeSet = new Set(manifest.trustees);
+  const attested = closing && closing.subject === board.tallyHash
+    ? closing.ballots.filter((b) => b.approve && trusteeSet.has(b.trustee)).length
+    : 0;
+  const trusteeLine = manifest.threshold === 0
+    ? "not required by the manifest"
+    : `${attested} of ${manifest.threshold} required (${manifest.trustees.length} named)`;
+
   $("board").replaceChildren(
     ...problems,
     el("table", {}, [el("tbody", {}, rows)]),
     el("dl", { className: "facts" }, [
       el("dt", { textContent: "Recomputed head" }), el("dd", { textContent: board.logHead }),
       el("dt", { textContent: "Recomputed tally hash" }), el("dd", { textContent: board.tallyHash }),
+      el("dt", { textContent: "Trustees attesting this count" }), el("dd", { textContent: trusteeLine }),
       el("dt", { textContent: "Merkle root from witness" }), el("dd", { textContent: root }),
     ])
   );
@@ -515,6 +546,7 @@ function renderBoard() {
       roll: state.current.roll,
       log: state.current.log,
       certified_head: head,
+      approvals: closing,
     };
     // Uint8Array fields (the IC certificate) must become hex: JSON.stringify
     // would otherwise render them as {"0":217,"1":...}, which the CLI

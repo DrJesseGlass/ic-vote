@@ -229,6 +229,22 @@ group("election hashing", () => {
     base !== toHex(eh.ballotSigMessage(cid, m, 0, 8n)), true);
   check("ballot message accepts pre-decoded canister bytes",
     toHex(eh.ballotSigMessage(principalToBytes(cid), m, 0, 9n)), base);
+  // The manifest commits to the trustee policy, matching the Rust test
+  // `trustees_and_threshold_are_bound_into_the_manifest`. A policy the hash
+  // did not cover could be swapped after the trustees approved it.
+  const draft = {
+    id: 1n, title: "t", question: "q", options: ["a", "b"], admin: cid,
+    trustees: [], threshold: 0, roll_hash: "0".repeat(64),
+    pin: {
+      repo: "r", commit: "c", bundle_sha256: "b", site_canister: "s",
+      module_sha256: "m", poll_module_sha256: "p", registry_chain_id: 1n, registry_address: "0x0",
+    },
+  };
+  const mh0 = eh.manifestHash(draft);
+  check("manifest hash binds the trustee list",
+    mh0 !== eh.manifestHash({ ...draft, trustees: ["aaaaa-aa"] }), true);
+  check("manifest hash binds the threshold",
+    mh0 !== eh.manifestHash({ ...draft, threshold: 1 }), true);
   // Witness recomputation over every shape, as in hashing.rs.
   const leaves = Array.from({ length: 9 }, (_, i) => toHex(sha256(utf8(`leaf${i}`))));
   const root = buildRoot(leaves);
@@ -514,9 +530,11 @@ async function live(canisterId, host) {
       }
     }
   };
+  const stages = unwrap(await agent.query("get_approvals", [["nat64", id]]));
   scan(manifest, "manifest");
   scan(head, "certified_head");
   scan(elections, "list_elections");
+  scan(stages, "get_approvals");
   check("every decoded field has a registered name", unnamed, []);
 
   const board = await eh.recomputeBoard({
@@ -530,6 +548,20 @@ async function live(canisterId, host) {
   check("recomputed log head matches", board.logHead, head.log_head);
   check("recomputed tally matches the canister's", board.counts.map(Number), tally.counts.map(Number));
   check("recomputed tally hash matches", board.tallyHash, tally.tally_hash);
+
+  // The trustee record, decoded by the same hand-written agent and counted
+  // against the RECOMPUTED tally hash and the manifest's own policy, the way
+  // the CLI verifier's check H does. demo-election.sh names one trustee with
+  // threshold one and has them attest the count before closing.
+  const closing = stages.find((a) => "Close" in a.stage);
+  check("the trustee record for the close exists", closing !== undefined, true);
+  check("trustee approvals are on the recomputed tally hash", closing?.subject, board.tallyHash);
+  const trusteeSet = new Set(manifest.trustees);
+  check("every trustee ballot is from a manifest trustee",
+    (closing?.ballots ?? []).every((b) => trusteeSet.has(b.trustee)), true);
+  const attested = (closing?.ballots ?? []).filter((b) => b.approve).length;
+  check("the count is attested by at least the manifest's threshold",
+    attested >= manifest.threshold, true);
 
   // Certificate: structural verification end to end.
   const cert = parseCertificate(head.certificate);

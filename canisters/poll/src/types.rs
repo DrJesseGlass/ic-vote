@@ -154,6 +154,66 @@ impl NewElection {
     }
 }
 
+/// Which lifecycle step a trustee is approving.
+///
+/// Each stage names a subject -- a hash the canister already computes and
+/// publishes -- so a trustee approves bytes a verifier can recompute, not a
+/// step label. `Open` approves the manifest hash: the question, options,
+/// roll, pin and trustee policy the window will freeze. `Close` approves the
+/// tally hash: manifest, log head and counts as they stand. A trustee who
+/// approves the close is attesting the count, not just the timing.
+#[derive(CandidType, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stage {
+    Open,
+    Close,
+}
+
+impl Stage {
+    /// The `kind` tag of the ic-multisig subject, so an approval of a
+    /// manifest hash can never be counted as an approval of a tally hash
+    /// with the same bytes.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Stage::Open => "manifest",
+            Stage::Close => "tally",
+        }
+    }
+}
+
+/// One trustee's recorded decision on a stage. Published, like every other
+/// record here: a trustee's attestation of the count is only worth something
+/// if the count's readers can see who gave it.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct TrusteeBallot {
+    pub trustee: Principal,
+    pub approve: bool,
+    pub at: u64,
+}
+
+/// The state of a stage's approvals, against the subject *as it stands now*.
+///
+/// The subject moves whenever what it hashes moves: editing a draft's roll
+/// changes the manifest hash, and a ballot landing changes the tally hash.
+/// Approvals are bound to the subject they were cast on, so a change after
+/// approval voids the approval without anyone having to notice. That is the
+/// point: a trustee never approves "whatever the administrator opens", they
+/// approve these bytes.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Approvals {
+    pub election_id: u64,
+    pub stage: Stage,
+    /// 64-hex: the manifest hash (`Open`) or the tally hash (`Close`) the
+    /// ballots below were cast on. Recompute it; do not trust it.
+    pub subject: String,
+    /// Every trustee's latest decision on this subject. Ballots on earlier
+    /// values of the subject are not shown; they no longer count.
+    pub ballots: Vec<TrusteeBallot>,
+    pub approvals: u32,
+    pub rejections: u32,
+    pub required: u32,
+    pub reached: bool,
+}
+
 /// Summary. Excludes the roll and the log, which have their own paginated
 /// endpoints because either can be large.
 #[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -163,6 +223,10 @@ pub struct ElectionView {
     pub question: String,
     pub options: Vec<String>,
     pub admin: Principal,
+    /// Sorted. Who may approve the opening and the count.
+    pub trustees: Vec<Principal>,
+    /// How many of them must. Zero: the administrator alone opens and closes.
+    pub threshold: u32,
     pub phase: Phase,
     pub created_at: u64,
     pub opened_at: Option<u64>,
@@ -178,6 +242,12 @@ pub struct ElectionView {
 
 /// Exactly the fields that go into `manifest_hash`, so a client can recompute
 /// it rather than believe the canister's copy.
+///
+/// Available from the moment a draft has a roll and a pin, not only once the
+/// election is open: a trustee asked to approve the manifest hash must be
+/// able to read the preimage. Until the election opens, `manifest_hash` is
+/// the value `open_election` *would* freeze from the draft as it stands;
+/// `ElectionView.manifest_hash` stays `None` until it actually has.
 #[derive(CandidType, Deserialize, Clone, Debug)]
 pub struct Manifest {
     pub id: u64,
@@ -185,7 +255,9 @@ pub struct Manifest {
     pub question: String,
     pub options: Vec<String>,
     pub admin: Principal,
-    pub opened_at: u64,
+    /// Sorted.
+    pub trustees: Vec<Principal>,
+    pub threshold: u32,
     /// 64-hex over the sorted roll.
     pub roll_hash: String,
     pub pin: Pin,
@@ -275,6 +347,12 @@ pub struct CertifiedHead {
 pub enum VoteError {
     NotFound,
     NotAdmin,
+    /// The caller is not in the election's trustee list.
+    NotTrustee,
+    /// The stage's subject has fewer trustee approvals than the manifest
+    /// requires. Counts are against the subject as it stands now, so this
+    /// can follow a full set of approvals if the subject moved since.
+    NotApproved { approvals: u32, required: u32 },
     WrongPhase { expected: String, actual: String },
     EmptyRoll,
     NoPin,

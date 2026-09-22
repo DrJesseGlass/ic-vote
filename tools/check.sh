@@ -54,7 +54,11 @@ trap 'dfx stop >/dev/null 2>&1 || true' EXIT
 # names of your choosing, not for shipping to mainnet.
 DEPLOY_IDENTITY="${DEPLOY_IDENTITY:-icvote-localtest-deployer}"
 ADMIN_IDENTITY="${ADMIN_IDENTITY:-icvote-localtest-admin}"
-export ADMIN_IDENTITY
+# The TRUSTEE approves the manifest before the window opens and the tally
+# before it closes. A third key, because the gate exists to keep the
+# administrator from doing either alone.
+TRUSTEE_IDENTITY="${TRUSTEE_IDENTITY:-icvote-localtest-trustee}"
+export ADMIN_IDENTITY TRUSTEE_IDENTITY
 
 # `dfx identity new` cannot tell us whether it created the identity or found
 # one already there, and deploying under key material this script did not
@@ -87,6 +91,7 @@ ensure_identity() {
 
 ensure_identity "$DEPLOY_IDENTITY" "deployer (controller)"
 ensure_identity "$ADMIN_IDENTITY" "administrator"
+ensure_identity "$TRUSTEE_IDENTITY" "trustee"
 
 dfx deploy --identity "$DEPLOY_IDENTITY" poll >/dev/null
 dfx deploy --identity "$DEPLOY_IDENTITY" site >/dev/null

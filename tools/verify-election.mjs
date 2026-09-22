@@ -45,7 +45,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 // hashing -- mirrors canisters/poll/src/hashing.rs
 // --------------------------------------------------------------------------
 
-const D_MANIFEST = "ic-vote/v0/manifest";
+const D_MANIFEST = "ic-vote/v0/manifest-trustees";
 const D_ROLL = "ic-vote/v0/roll";
 const D_GENESIS = "ic-vote/v0/log-genesis";
 // "-signed": see the note on D_ENTRY in canisters/poll/src/hashing.rs.
@@ -115,9 +115,10 @@ const manifestHash = (m) => {
     .text(m.question)
     .u32(m.options.length);
   for (const o of m.options) w.text(o);
+  w.lp(principalToBytes(m.admin)).u32(m.trustees.length);
+  for (const t of m.trustees) w.lp(principalToBytes(t));
   return w
-    .lp(principalToBytes(m.admin))
-    .u64(m.opened_at)
+    .u32(m.threshold)
     .h(m.roll_hash)
     .text(m.pin.repo)
     .text(m.pin.commit)
@@ -369,6 +370,15 @@ function findLabel(node, label) {
 /// produced a plain number has already rounded them. A rounded timestamp
 /// hashes to garbage and would surface as a bogus chain failure, so reject the
 /// input rather than report a failure that is really a parsing bug.
+/// nat32 fields (the trustee threshold) fit a JSON number; anything else is a
+/// malformed bulletin, not a verdict.
+function u32(v, what) {
+  if (typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= 0xffffffff) return v;
+  if (typeof v === "string" && /^[0-9_]+$/.test(v)) return u32(Number(v.replace(/_/g, "")), what);
+  if (typeof v === "bigint" && v >= 0n && v <= 0xffffffffn) return Number(v);
+  throw new Error(`${what} is not a nat32: ${JSON.stringify(v)}`);
+}
+
 function u64(v, what) {
   if (typeof v === "bigint") return v;
   if (typeof v === "string") return BigInt(v.replace(/_/g, ""));
@@ -449,7 +459,12 @@ function fetchBulletin(opts, canister, id) {
     if (page.length < 1000) break;
   }
 
-  return { canister, election, manifest, roll, log, certified_head: head };
+  // The trustee record. Fetched for every election, required by check H
+  // only when the manifest names a threshold.
+  const stages = unwrap(dfxCall(opts, canister, "get_approvals", `(${id}:nat64)`), "get_approvals");
+  const approvals = stages.find((a) => a.stage && "Close" in a.stage) ?? null;
+
+  return { canister, election, manifest, roll, log, certified_head: head, approvals };
 }
 
 // --------------------------------------------------------------------------
@@ -493,7 +508,8 @@ function verify(b) {
     question: m.question,
     options: m.options,
     admin: m.admin,
-    opened_at: u64(m.opened_at, "manifest.opened_at"),
+    trustees: m.trustees,
+    threshold: u32(m.threshold, "manifest.threshold"),
     roll_hash: rh,
     pin: { ...m.pin, registry_chain_id: u64(m.pin.registry_chain_id, "pin.registry_chain_id") },
   });
@@ -608,6 +624,26 @@ function verify(b) {
   console.log(`      tally_hash ${th}`);
   console.log("");
 
+  // H -- the trustees' attestation of that count. The manifest names who
+  // must approve and how many; the canister publishes their ballots on the
+  // tally hash. Counted here from the published ballots against OUR tally
+  // hash and OUR reading of the manifest, never from the canister's
+  // `approvals`/`reached` summary. Lettered H because it lands after F and G
+  // in the ledger of checks but reads naturally next to the tally.
+  //
+  // What it does NOT establish, stated here so the PASS line is not read for
+  // more than it is worth: these are ic-multisig's AUTHENTICATED approvals.
+  // The IC authenticated each trustee's envelope when it was cast, but the
+  // stored record carries no signature, and `certified_data` commits to
+  // (id, manifest_hash, log_head, ballot_count) only -- not to the trustee
+  // record. So a dishonest canister can serve a trustee record it made up,
+  // and nothing here would catch it. Check H catches an inconsistent
+  // bulletin (approvals on the wrong tally, an outsider, a missing quorum),
+  // not a lying canister. Making that independently checkable needs the
+  // crate's SIGNED flavour, or the record inside certified_data; see
+  // docs/V0_STATUS.md.
+  verifyTrustees(b, m, th);
+
   // F -- inclusion of this election in the canister's certified tree.
   const ch = b.certified_head;
   const leaf = merkleLeaf(id, mh, head, u64(ch.ballot_count, "certified_head.ballot_count"));
@@ -655,6 +691,53 @@ function verify(b) {
   );
   if (cert.get("delegation")) {
     warn("G. delegation", "subnet delegation present and also unchecked");
+  }
+}
+
+function verifyTrustees(b, m, tallyHex) {
+  const threshold = u32(m.threshold, "manifest.threshold");
+  const trustees = m.trustees.map((t) => principalToBytes(t).toString("hex"));
+  if (threshold === 0) {
+    pass("H. trustees", "manifest requires no trustee approval; the administrator closes alone");
+    return;
+  }
+  const a = b.approvals;
+  if (!a || !Array.isArray(a.ballots)) {
+    fail("H. trustees", `manifest requires ${threshold} of ${trustees.length} trustees, but the bulletin carries no trustee record`);
+    return;
+  }
+  if (a.subject !== tallyHex) {
+    fail("H. trustees", `published approvals are on ${a.subject}, not on the recomputed tally hash`);
+    return;
+  }
+  const seen = new Set();
+  let approvals = 0;
+  let ok = true;
+  a.ballots.forEach((ballot, idx) => {
+    const who = principalToBytes(ballot.trustee).toString("hex");
+    if (!trustees.includes(who)) {
+      fail("H. trustees", `approval ${idx} is from ${ballot.trustee}, who is not a trustee in the manifest`);
+      ok = false;
+    } else if (seen.has(who)) {
+      fail("H. trustees", `${ballot.trustee} appears more than once in the trustee record`);
+      ok = false;
+    }
+    seen.add(who);
+    if (ballot.approve === true) approvals += 1;
+  });
+  if (!ok) return;
+  const closed = b.election?.phase && "Closed" in b.election.phase;
+  if (approvals >= threshold) {
+    pass(
+      "H. trustees",
+      `${approvals} of ${trustees.length} trustees attest this count (${threshold} required)` +
+        ` -- as published by the canister; these approvals carry no signature` +
+        ` and are not covered by certified_data`
+    );
+  } else if (closed) {
+    fail("H. trustees", `closed with ${approvals} of the ${threshold} required trustee approvals on the final count`);
+  } else {
+    warn("H. trustees", `window still open; ${approvals} of ${threshold} required trustees have attested the count so far`);
   }
 }
 
