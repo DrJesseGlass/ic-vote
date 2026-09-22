@@ -36,7 +36,7 @@ radius is one file. That is the bet, stated so it can be judged.
 
 | Piece | Where | Evidence |
 |---|---|---|
-| Election lifecycle, roll, one-ballot-per-credential | `canisters/poll/src/state.rs` | 34 unit tests |
+| Election lifecycle, roll, one-ballot-per-credential | `canisters/poll/src/state.rs` | 35 unit tests |
 | Trustee K-of-N gate on opening and closing (the `ic-multisig` crate, shared with ic-git) | `state.rs::set_trustees`, `approve`, `open`, `close` | `opening_waits_for_k_trustees_to_approve_the_manifest`, `closing_waits_for_trustees_to_attest_the_count`; check H in `tools/verify-election.mjs`; 4 tamper cases |
 | Domain-separated, length-prefixed hash rules | `canisters/poll/src/hashing.rs` | property tests over every tree shape |
 | Manifest freezing (question, options, roll, pin, trustees) at open | `state.rs::open` | `roll_and_pin_are_frozen_once_open`, `manifest_is_readable_in_draft_and_is_what_open_freezes` |
@@ -204,6 +204,19 @@ What that establishes, stated exactly:
 
 What it does **not** establish:
 
+- That the trustee record is genuine. These are the crate's *authenticated*
+  approvals: the IC authenticated each trustee's envelope when it was cast,
+  but the stored ballot carries no signature, and `certified_data` commits to
+  `(id, manifest_hash, log_head, ballot_count)` -- not to the trustee record.
+  A dishonest canister can therefore serve a trustee record it invented, and
+  check H would pass it. Check H catches an *inconsistent bulletin* --
+  approvals on some other tally, a ballot from an outsider, a missing quorum
+  -- not a lying canister, and its PASS line says so. Making it independently
+  checkable needs either the crate's *signed* flavour or the record inside
+  `certified_data`; neither is built.
+- That the *opening* was approved. Both verifiers read only the `Close`
+  stage, so the manifest gate is enforced by the canister alone and is not
+  recomputed anywhere.
 - Who the trustees are. The administrator names them, in Draft, exactly as
   they upload the roll. This is the T4 boundary again, published so members
   can audit it, not removed.

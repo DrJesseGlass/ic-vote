@@ -630,6 +630,18 @@ function verify(b) {
   // hash and OUR reading of the manifest, never from the canister's
   // `approvals`/`reached` summary. Lettered H because it lands after F and G
   // in the ledger of checks but reads naturally next to the tally.
+  //
+  // What it does NOT establish, stated here so the PASS line is not read for
+  // more than it is worth: these are ic-multisig's AUTHENTICATED approvals.
+  // The IC authenticated each trustee's envelope when it was cast, but the
+  // stored record carries no signature, and `certified_data` commits to
+  // (id, manifest_hash, log_head, ballot_count) only -- not to the trustee
+  // record. So a dishonest canister can serve a trustee record it made up,
+  // and nothing here would catch it. Check H catches an inconsistent
+  // bulletin (approvals on the wrong tally, an outsider, a missing quorum),
+  // not a lying canister. Making that independently checkable needs the
+  // crate's SIGNED flavour, or the record inside certified_data; see
+  // docs/V0_STATUS.md.
   verifyTrustees(b, m, th);
 
   // F -- inclusion of this election in the canister's certified tree.
@@ -716,7 +728,12 @@ function verifyTrustees(b, m, tallyHex) {
   if (!ok) return;
   const closed = b.election?.phase && "Closed" in b.election.phase;
   if (approvals >= threshold) {
-    pass("H. trustees", `${approvals} of ${trustees.length} trustees attest this count (${threshold} required)`);
+    pass(
+      "H. trustees",
+      `${approvals} of ${trustees.length} trustees attest this count (${threshold} required)` +
+        ` -- as published by the canister; these approvals carry no signature` +
+        ` and are not covered by certified_data`
+    );
   } else if (closed) {
     fail("H. trustees", `closed with ${approvals} of the ${threshold} required trustee approvals on the final count`);
   } else {

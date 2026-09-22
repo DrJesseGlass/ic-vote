@@ -19,6 +19,12 @@ use crate::types::*;
 /// one, and a policy is a handful of named people, not a roll.
 pub const MAX_TRUSTEES: usize = 256;
 
+/// Ceiling on the values of a stage's subject an election remembers ballots
+/// for. See `TrusteeBallots::save`: without it, a trustee re-approving after
+/// every draft edit or every ballot grows unmigratable heap state one entry
+/// per call, for the same reason `MAX_ROLL` exists.
+pub const MAX_APPROVAL_SUBJECTS: usize = 32;
+
 /// Ceiling on roll size. State lives on the heap and is re-serialized on every
 /// upgrade, so this is a real limit, not a formality: at ~29 bytes per
 /// principal a 200k roll is ~6 MB of roll plus a ballot log of similar order.
@@ -84,7 +90,7 @@ pub struct Election {
     /// per subject rather than per stage so that when the subject moves --
     /// the draft is edited, a ballot lands -- the old approvals stay on
     /// record but stop counting, instead of quietly carrying over to bytes
-    /// nobody approved.
+    /// nobody approved. Bounded per stage by `MAX_APPROVAL_SUBJECTS`.
     pub approvals: BTreeMap<String, Vec<Approval>>,
 }
 
@@ -99,7 +105,19 @@ impl ic_multisig::Store for TrusteeBallots<'_> {
     }
 
     fn save(&mut self, subject: &Subject, ballots: Vec<Approval>) {
-        self.0.insert(subject.key(), ballots);
+        let key = subject.key();
+        self.0.insert(key.clone(), ballots);
+        // The subject moves on every draft edit and every ballot cast, and a
+        // trustee may approve each value it takes, so an unbounded map here
+        // is one heap entry per update call -- state no endpoint can read
+        // back once the subject has moved on (`approvals_on` only ever looks
+        // up the current subject) and that v3 refuses to migrate away. Well
+        // above any honest election's churn; past it, the superseded entries
+        // for this stage go and only the current subject is kept.
+        let prefix = format!("{}:", subject.kind);
+        if self.0.keys().filter(|k| k.starts_with(&prefix)).count() > MAX_APPROVAL_SUBJECTS {
+            self.0.retain(|k, _| !k.starts_with(&prefix) || *k == key);
+        }
     }
 }
 
@@ -1230,16 +1248,35 @@ mod tests {
     }
 
     #[test]
+    fn stored_approvals_are_bounded_per_stage() {
+        // The subject moves on every draft edit, and a trustee may approve
+        // each value it takes. Unbounded, that is one permanent heap entry
+        // per update call -- entries no endpoint can read back once the
+        // subject has moved on, in state no upgrade can migrate away.
+        let (mut s, id) = drafted_with_trustees(1);
+        for i in 0..(MAX_APPROVAL_SUBJECTS + 5) {
+            s.set_roll(p(1), id, vec![voter(10).2, voter(100 + i as u8).2])
+                .unwrap();
+            s.approve(p(20), id, Stage::Open, true, 150 + i as u64).unwrap();
+        }
+        assert!(s.election(id).unwrap().approvals.len() <= MAX_APPROVAL_SUBJECTS);
+        // The subject as it stands is always the one kept, so the gate the
+        // bound protects still works.
+        assert_eq!(approvals(&s, id, Stage::Open), (1, 1, true));
+        s.open(p(1), id, 900).unwrap();
+    }
+
+    #[test]
     fn closing_waits_for_trustees_to_attest_the_count() {
         let (mut s, id) = drafted_with_trustees(2);
+        // Nothing to attest before the window opens: there is no count yet.
+        assert!(matches!(
+            s.approve(p(20), id, Stage::Close, true, 140),
+            Err(VoteError::WrongPhase { .. })
+        ));
         s.approve(p(20), id, Stage::Open, true, 150).unwrap();
         s.approve(p(21), id, Stage::Open, true, 160).unwrap();
         s.open(p(1), id, 200).unwrap();
-        // Nothing to attest before the window opens.
-        assert!(matches!(
-            s.approve(p(20), 99, Stage::Close, true, 250),
-            Err(VoteError::NotFound)
-        ));
         cast(&mut s, id, 10, 0, 300).unwrap();
         assert_eq!(
             s.close(p(1), id, 400),

@@ -127,7 +127,15 @@ async function selectElection(id) {
   // and a voter should see a recomputed tally even on a page that fails its
   // own provenance check. Failing provenance means "do not trust this page to
   // take your vote", not "hide the public record".
-  if (manifest) {
+  //
+  // Only once the election has actually opened, though. `get_manifest` now
+  // answers in Draft too, with the hash `open_election` WOULD freeze -- that
+  // is what trustees approve -- but nothing is committed yet: the canister's
+  // log head is still zero while a board recomputed from a draft manifest
+  // chains from its genesis, and the certified leaf still carries zeros. A
+  // board built on that shows a "recomputed head" and a Merkle root that
+  // disagree with every published value, with no problem to explain why.
+  if (manifest && view.manifest_hash) {
     current.board = await eh.recomputeBoard({
       manifest,
       roll,

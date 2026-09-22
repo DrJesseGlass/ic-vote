@@ -43,6 +43,26 @@ TRUSTEE="${TRUSTEE_IDENTITY:-icvote-localtest-trustee}"
 
 say() { printf '\n\033[1m== %s\033[0m\n' "$1"; }
 call() { dfx canister call --network "$NETWORK" --identity "$1" poll "${@:2}"; }
+# `dfx canister call` exits 0 even when the canister replies with a candid
+# `Err`, so a "must be refused" step written as `call ... || true` asserts
+# nothing: a regression that let the administrator open or close without the
+# trustees would print a successful reply and the demo would sail past it.
+# This looks at the reply instead.
+# Matched on `Err =`, the candid reply's field, not on the word "Error": a
+# dfx transport failure must not read as a refusal by the canister.
+refused() {
+  local out
+  if ! out="$(call "$@" 2>&1)"; then
+    printf '%s\n' "$out"
+    echo "FAILED: the call above never reached the canister"
+    exit 1
+  fi
+  printf '%s\n' "$out"
+  case "$out" in
+    *"Err ="*) ;;
+    *) echo "FAILED: expected the call above to be refused"; exit 1 ;;
+  esac
+}
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
 # cast-ballot.mjs speaks HTTP to a replica, not dfx, so NETWORK alone cannot
@@ -129,7 +149,7 @@ say "name the trustee who must approve the opening and the count"
 call "$ADMIN" set_trustees "($ID:nat64, vec { principal \"$TRUSTEE_P\" }, 1:nat32)"
 
 say "the administrator tries to open without the trustee (must be refused)"
-call "$ADMIN" open_election "($ID:nat64)" || true
+refused "$ADMIN" open_election "($ID:nat64)"
 
 say "the trustee approves the manifest hash"
 call "$TRUSTEE" approve "($ID:nat64, variant { Open }, true)"
@@ -157,7 +177,7 @@ say "a signature over a different choice than submitted (must be refused)"
 cast --key "$KEYDIR/voter-3.key" --election "$ID" --choice 0 --sign-choice 1 || true
 
 say "the administrator tries to close without the trustee (must be refused)"
-call "$ADMIN" close_election "($ID:nat64)" || true
+refused "$ADMIN" close_election "($ID:nat64)"
 
 say "the trustee approves the tally hash, attesting the count"
 call "$TRUSTEE" approve "($ID:nat64, variant { Close }, true)"
