@@ -34,7 +34,20 @@ ic-git interface to be real and is the first evidence the stack works for
 someone who is not ic-git.
 
 This repo is therefore meant to be pushed to and served from ic-git, not
-deployed by hand.
+deployed by hand. Two scripts do it, and neither needs dfx or a key:
+everything a wallet can do is done in the ic-git console, signed in as
+the wallet that owns the repo -- create the repo, create its app canister,
+set "deploy on push" to `app.wasm`, set "serve as site" to `site`, mint a
+push token -- and `tools/push-ic-git.sh --repo NAME` does the rest with
+the token: it stages `dist/` (`tools/stage-ic-git.sh`: `app.wasm` for
+the deploy queue; `site/` rendered for that deployment, with the poll
+canister's id in `config.js`, the page's modules linked into one `app.js`,
+and an `integrity` hash on each file `index.html` loads, so that hash
+covers every byte the page runs; and the sources and pinned toolchain that
+reproduce the wasm), commits it
+on top of the repo's tip, pushes, and watches `/api/NAME/deploys` until
+the install reports. The ballot page is then at `/site/NAME/` on ic-git
+and the poll canister is the repo's app canister.
 
 ## Documents
 
