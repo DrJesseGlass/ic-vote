@@ -60,12 +60,21 @@ site_args=(--src site --out "$out/site" --poll-canister "$poll")
 node tools/stage-site.mjs "${site_args[@]}"
 
 wasm_sha=$(shasum -a 256 "$out/app.wasm" | cut -d' ' -f1)
+# The source this rendering came from. "-dirty" means the working tree had
+# uncommitted edits, so no commit reproduces it exactly; fine for a local
+# run, not for anything a pin will point at.
+src=$(git rev-parse HEAD 2>/dev/null || echo unknown)
+[ -z "$(git status --porcelain 2>/dev/null)" ] || src="$src-dirty"
+printf '%s\n' "$src" > "$out/SOURCE_COMMIT"
 cat > "$out/README.md" <<README
 # ic-vote, staged for ic-git
 
 This tree was produced by \`tools/stage-ic-git.sh\` in the ic-vote repository
-and is what gets pushed to the ic-git canister. It is not the development
-tree; the page under \`site/\` has been rendered for one deployment.
+at commit \`$src\` (also in \`SOURCE_COMMIT\`) and is what gets pushed to the
+ic-git canister. It is not the development tree; the page under \`site/\`
+has been rendered for one deployment, and \`tools/stage-site.mjs\` at that
+commit reproduces the rendering from \`site/\` there, given the two ids
+below.
 
 - \`app.wasm\`: the poll canister. sha256 \`$wasm_sha\`. Reproduce it from
   the sources here with \`cargo build -p ic_vote_poll --release --target

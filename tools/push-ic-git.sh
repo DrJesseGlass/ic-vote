@@ -87,6 +87,9 @@ echo "ok"
 say "stage"
 tools/stage-ic-git.sh --poll-canister "$app" --git-canister "$git_id" --out "$out" >/dev/null
 wasm_sha=$(shasum -a 256 "$out/app.wasm" | cut -d' ' -f1)
+src=$(cat "$out/SOURCE_COMMIT")
+echo "source          : ic-vote $src"
+case "$src" in *-dirty) echo "                  (uncommitted edits: no ic-vote commit reproduces this push; commit first before pinning an election to it)" ;; esac
 echo "app.wasm sha256 : $wasm_sha"
 echo "site            : $(find "$out/site" -type f | wc -l | tr -d ' ') files, rendered for $app"
 
@@ -104,7 +107,8 @@ fi
 if git -C "$out" -c user.name="ic-vote" -c user.email="ic-vote@ic-git.invalid" \
     commit -q -m "ic-vote, staged for ic-git
 
-poll canister $app
+source   ic-vote $src
+poll     $app
 app.wasm sha256 $wasm_sha" >/dev/null 2>&1; then
   commit=$(git -C "$out" rev-parse HEAD)
   # The token is the credential: it goes in the URL git is handed and
