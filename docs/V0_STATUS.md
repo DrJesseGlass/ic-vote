@@ -100,14 +100,37 @@ name. An empty set produces RED, and RED is correct.
 
 ## The controller is a party (T7), and there are two of them
 
-Whoever deploys a canister is its controller, and a controller can upgrade it.
-There are **two** canisters here, with different controllers and different
-powers, and an earlier version of this section conflated them:
+Whoever controls a canister can upgrade it. There are **two** canisters
+here, with different powers, and an earlier version of this section
+conflated them:
 
 - the **site canister** serves the ballot bundle. Its controller can change
-  what the voter sees.
+  what the voter sees. This is the ic-git canister itself: the bundle is
+  served out of a commit in a repo it holds, and its controller is ic-git's
+  operator.
 - the **poll canister** holds the roll, the log and the tally. Its controller
-  can change what the ballots *mean*.
+  can change what the ballots *mean*. This is the repo's **app canister** on
+  ic-git (`tools/push-ic-git.sh`, README "Why this is a separate repo"), and
+  it has **two** controllers: the wallet that owns the repo, and ic-git,
+  which installs `app.wasm` from each push through its deploy queue.
+
+**A second correction.** This section used to say the two canisters had
+"different controllers", which was true while the poll canister was
+deployed with dfx under a key of its own. It is not true now: ic-git is a
+controller of both, and the repo owner is a second party on the poll
+canister. Two consequences follow, and neither is hidden by the pin:
+
+- Every push to the repo can change the code that counts. ic-git's own
+  gate covers this: `set_required_votes(repo, k)` with the trustees as the
+  repo's voters holds every push until `k` of them have approved that
+  commit, before the deploy queue runs it. That is a K-of-N on the *commit*,
+  authenticated by the IC, live today. It is not the K-of-N on the module
+  hash that the trusted verifier set is for (below), which is still unbuilt.
+- `Pin.module_sha256` is ic-git's module hash, so an ic-git upgrade during
+  an open window is a spoiling event by construction: a certified read that
+  differs is RED. That was already so; what is new is that the party who
+  upgrades ic-git is also the party who deploys the poll canister, so ic-git
+  releases have to be scheduled around election windows.
 
 The election's pin now names a module hash for each: `Pin.module_sha256` for
 the site canister and `Pin.poll_module_sha256` for the poll canister, both
@@ -149,7 +172,11 @@ Three consequences worth stating plainly:
    the canister is not the "availability only" party T6 describes. The check
    asserts the resulting controller set for both canisters and fails the run on
    an unexpected one, rather than printing it and hoping someone reads the
-   scrollback.
+   scrollback. That harness deploys with dfx on a local replica, which is
+   still how the rules are exercised; on mainnet the deployer is ic-git's
+   deploy queue and the controller set of the poll canister is the repo
+   owner plus ic-git, as stated above, and the administrator should be a
+   different key from the repo owner for the same reason.
 
 Every script under `tools/` passes `--identity` explicitly rather than
 inheriting the ambient `dfx` selection, including `verify-election.mjs`'s
