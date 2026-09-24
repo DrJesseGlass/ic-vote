@@ -9,8 +9,9 @@
 # Before running, in the console, signed in as the wallet that owns NAME:
 # create the repo, create its app canister, set "deploy on push" to
 # app.wasm, set "serve as site" to site, and mint a push token. Give the
-# token as IC_GIT_TOKEN in the environment or type it at the prompt; it
-# never goes on a command line and is never printed.
+# token as IC_GIT_TOKEN in the environment or type it at the prompt. It is
+# never printed and never goes on a command line, not even git's: git gets
+# it through a credential helper that reads the environment.
 #
 # What happens, in order, and what is checked before anything is pushed:
 #   1. /api/NAME/info must name an app canister: the page is rendered
@@ -111,9 +112,19 @@ source   ic-vote $src
 poll     $app
 app.wasm sha256 $wasm_sha" >/dev/null 2>&1; then
   commit=$(git -C "$out" rev-parse HEAD)
-  # The token is the credential: it goes in the URL git is handed and
-  # nowhere else. git prints the remote without it.
-  git -C "$out" push -q "$scheme://ic:$IC_GIT_TOKEN@$host/$repo.git" main
+  # The token is the credential, and it stays out of every argument list.
+  # A command line is readable by every process on the machine (ps, /proc)
+  # for as long as the push runs; a child's environment is readable only
+  # by the same user. So the remote URL carries no credential and git is
+  # handed a one-off helper that answers its 401 challenge from the
+  # environment. The empty helper first clears any configured helper, so
+  # the OS keychain is neither asked nor offered the token to store, and
+  # GIT_TERMINAL_PROMPT=0 makes a refused token fail instead of prompting.
+  export IC_GIT_TOKEN
+  GIT_TERMINAL_PROMPT=0 git -C "$out" \
+    -c credential.helper= \
+    -c credential.helper='!f() { cat >/dev/null; [ "$1" = get ] || exit 0; printf "username=ic\npassword=%s\n" "$IC_GIT_TOKEN"; }; f' \
+    push -q "$origin/$repo.git" main
   echo "pushed $commit"
 else
   commit=$(git -C "$out" rev-parse HEAD)

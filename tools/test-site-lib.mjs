@@ -18,8 +18,11 @@ import { createHash, webcrypto } from "node:crypto";
 // The site libraries reach WebCrypto through the browser global; provide it
 // under Node 18, where it exists but is not global.
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
-import { readdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { runInThisContext } from "node:vm";
 import { sha256, sha224, toHex, utf8, fromHex, concat } from "../site/lib/sha256.js";
 import { keccak256, selector, sha3_256 } from "../site/lib/keccak.js";
 import {
@@ -466,6 +469,89 @@ await group("site module graph", async () => {
     }
   }
   check("every named import resolves", unresolved, []);
+});
+
+await group("staged site (tools/stage-site.mjs)", async () => {
+  // Staging links the module graph into one app.js, because the integrity
+  // hash index.html carries for a script does not reach the modules that
+  // script imports. Stage into a scratch directory and check what came out:
+  // one script, pinned by the hash of its bytes, that evaluates, and in
+  // which every source module's exports survived the link unchanged.
+  const siteDir = new URL("../site/", import.meta.url);
+  const sources = readdirSync(siteDir, { recursive: true }).map(String).filter((f) => f.endsWith(".js")).sort();
+  const out = mkdtempSync(join(tmpdir(), "ic-vote-stage-"));
+  try {
+    let stderr = "";
+    try {
+      execFileSync(process.execPath, [
+        fileURLToPath(new URL("./stage-site.mjs", import.meta.url)),
+        "--src", fileURLToPath(siteDir), "--out", out, "--poll-canister", "aaaaa-aa",
+      ], { stdio: "pipe" });
+    } catch (e) {
+      stderr = String(e.stderr ?? e.message);
+    }
+    check("stage-site.mjs succeeds", stderr, "");
+    if (stderr) return;
+
+    const staged = readdirSync(out, { recursive: true }).map(String).sort();
+    check("the staged tree carries exactly one script", staged.filter((f) => /\.m?js$/.test(f)), ["app.js"]);
+
+    const html = readFileSync(join(out, "index.html"), "utf8");
+    const tags = [...html.matchAll(/<(?:script|link)\b[^>]*\s(?:src|href)="[^"]*"[^>]*>/g)].map((m) => m[0]);
+    check("index.html loads two files and pins both",
+      tags.map((t) => /\sintegrity="sha384-[A-Za-z0-9+/]+={0,2}"/.test(t)), [true, true]);
+    const linked = readFileSync(join(out, "app.js"));
+    check("the pin on app.js is the sha384 of the linked file",
+      /src="\.\/app\.js" integrity="sha384-([^"]+)"/.exec(html)?.[1],
+      createHash("sha384").update(linked).digest("base64"));
+
+    // Evaluate the linked file with the browser surface stubbed out, and
+    // capture its module registry. `absorb` accepts any property, call or
+    // assignment; it is not a thenable, so awaiting it does not hang.
+    const absorb = new Proxy(function () {}, {
+      get: (_t, k) => (k === "then" ? undefined : k === Symbol.toPrimitive ? () => "" : absorb),
+      set: () => true,
+      apply: () => absorb,
+      construct: () => absorb,
+    });
+    const stubs = { document: absorb, window: absorb, localStorage: absorb, fetch: () => Promise.reject(new Error("offline test")) };
+    const saved = {};
+    for (const [k, v] of Object.entries(stubs)) {
+      saved[k] = Object.getOwnPropertyDescriptor(globalThis, k);
+      Object.defineProperty(globalThis, k, { value: v, configurable: true, writable: true });
+    }
+    // boot() runs at the end of app.js and fails against the stubs, which is
+    // fine; only its rejections must not take the test process down.
+    const swallow = () => {};
+    process.on("unhandledRejection", swallow);
+    const registry = new Map();
+    globalThis.__icVoteLinked = registry;
+    let evalError = null;
+    try {
+      const script = linked.toString().split("const __modules = new Map();");
+      check("the linked file declares its module registry once", script.length, 2);
+      runInThisContext(script.join("const __modules = globalThis.__icVoteLinked;"), { filename: "linked-app.js" });
+      await new Promise((r) => setTimeout(r, 50));
+    } catch (e) {
+      evalError = e.message;
+    } finally {
+      process.off("unhandledRejection", swallow);
+      delete globalThis.__icVoteLinked;
+      for (const [k, d] of Object.entries(saved)) {
+        if (d) Object.defineProperty(globalThis, k, d); else delete globalThis[k];
+      }
+    }
+    check("the linked app.js evaluates", evalError, null);
+    check("every source module was linked, and nothing else", [...registry.keys()].sort(), sources);
+    for (const key of sources) {
+      if (!registry.has(key)) continue;
+      // app.js is the entry: importing the source would run boot() here.
+      const want = key === "app.js" ? [] : Object.keys(await import(new URL(key, siteDir).href)).sort();
+      check(`${key} exports the same names linked as it does as a module`, Object.keys(registry.get(key)).sort(), want);
+    }
+  } finally {
+    rmSync(out, { recursive: true, force: true });
+  }
 });
 
 // --- live replica ---------------------------------------------------------

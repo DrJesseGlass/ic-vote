@@ -12,8 +12,9 @@
 #
 #   DIR/app.wasm            the poll canister, built --locked from this tree
 #   DIR/site/               the page, rendered for this deployment
-#                           (tools/stage-site.mjs: canister id in, SRI on)
-#   DIR/Cargo.toml, Cargo.lock, canisters/poll/
+#                           (tools/stage-site.mjs: canister id in, modules
+#                           linked into one app.js, SRI on)
+#   DIR/Cargo.toml, Cargo.lock, rust-toolchain.toml, canisters/poll/
 #                           what reproduces app.wasm, so the repo browser
 #                           shows the source of what was installed
 #
@@ -51,7 +52,7 @@ say "stage $out"
 rm -rf "$out"
 mkdir -p "$out/canisters/poll"
 cp "$wasm" "$out/app.wasm"
-cp Cargo.toml Cargo.lock "$out/"
+cp Cargo.toml Cargo.lock rust-toolchain.toml "$out/"
 cp canisters/poll/Cargo.toml canisters/poll/poll.did "$out/canisters/poll/"
 cp -R canisters/poll/src "$out/canisters/poll/src"
 
@@ -78,12 +79,19 @@ below.
 
 - \`app.wasm\`: the poll canister. sha256 \`$wasm_sha\`. Reproduce it from
   the sources here with \`cargo build -p ic_vote_poll --release --target
-  wasm32-unknown-unknown --locked\` (rust-toolchain and profile as in
-  \`Cargo.toml\`).
-- \`site/\`: the ballot page. \`config.js\` names the poll canister
-  (\`$poll\`); \`index.html\` carries an \`integrity\` hash for each file it
-  loads, which ic-git requires before it will serve the page.
-- \`Cargo.toml\`, \`Cargo.lock\`, \`canisters/poll/\`: the source of \`app.wasm\`.
+  wasm32-unknown-unknown --locked\`, under the compiler that
+  \`rust-toolchain.toml\` pins (rustup selects it in this directory). The
+  compiler version is embedded in the module, so a different compiler gives
+  a different hash from the same source and lockfile.
+- \`site/\`: the ballot page: \`index.html\`, \`style.css\` and one \`app.js\`,
+  which is the source tree's \`app.js\`, \`config.js\` and \`lib/*.js\` linked
+  into a single file, so that the \`integrity\` hash \`index.html\` carries for
+  it covers every module the page runs (a script tag's hash does not reach
+  the modules that script imports). The linked \`config.js\` names the poll
+  canister (\`$poll\`). ic-git requires the hashes before it will serve the
+  page.
+- \`Cargo.toml\`, \`Cargo.lock\`, \`rust-toolchain.toml\`, \`canisters/poll/\`:
+  the source of \`app.wasm\`.
 
 ic-git configuration this tree expects, on the repo it is pushed to:
 
