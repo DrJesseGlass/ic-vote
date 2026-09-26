@@ -1,44 +1,59 @@
 #!/usr/bin/env bash
 # Push ic-vote to ic-git and watch it deploy. No dfx and no identity here:
 # everything a wallet can do is done in the ic-git console, and this does
-# only the rest -- stage, commit, push with the token, read the public
-# /api routes to see it land.
+# only the rest -- stage, commit, push signed with the token, read the
+# public /api routes to see it land.
 #
-#   tools/push-ic-git.sh --repo NAME [--git-canister ID] [--network ic|local] [--port N]
+#   tools/push-ic-git.sh --repo NAME [--signing-key PATH] [--git-canister ID]
+#                        [--network ic|local] [--port N]
 #
 # Before running, in the console, signed in as the wallet that owns NAME:
 # create the repo, create its app canister, set "deploy on push" to
-# app.wasm, set "serve as site" to site, and mint a push token. Give the
+# app.wasm, set "serve as site" to site, and mint a push token bound to
+# your SSH key (paste the .pub into the token's key field). Give the
 # token as IC_GIT_TOKEN in the environment or type it at the prompt. It is
 # never printed and never goes on a command line, not even git's: git gets
 # it through a credential helper that reads the environment.
+#
+# Every push is signed: git sends a push certificate signed with the SSH
+# key at --signing-key (default ~/.ssh/id_ed25519.pub; ed25519 only, the
+# one type ic-git accepts). The certificate binds the ref update and a
+# nonce ic-git issued, so the token alone cannot push -- a bound token
+# accepts only its key's certificate, and a repo with "require signed
+# pushes" on refuses any push without one. The key's private half is used
+# through ssh-keygen as git does (the agent, or the file next to the .pub).
 #
 # What happens, in order, and what is checked before anything is pushed:
 #   1. /api/NAME/info must name an app canister: the page is rendered
 #      against it, so there is nothing to stage without one.
 #   2. /api/NAME/deploys must say app.wasm deploys into that canister;
 #      otherwise the push would land and install nothing, silently.
-#   3. tools/stage-ic-git.sh produces dist/.
-#   4. dist/ is committed on top of the repo's current tip and pushed.
-#      ic-git refuses anything but a fast-forward, so a stale local copy
-#      is refused rather than merged.
-#   5. /api/NAME/deploys is polled until the deploy of that commit reports,
-#      and /site/NAME/ is checked to be serving it.
+#   3. The signing key must be an ssh-ed25519 public key.
+#   4. tools/stage-ic-git.sh produces dist/.
+#   5. dist/ is committed on top of the repo's current tip and pushed
+#      signed. ic-git refuses anything but a fast-forward, so a stale local
+#      copy is refused rather than merged.
+#   6. /api/NAME/deploys is polled until the deploy of that commit reports,
+#      and /site/NAME/ is checked to be serving it. When the repo requires
+#      votes, the deploy is held until a voter approves the commit; the
+#      script says which commit and waits for the approval.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 repo=""; git_id=""; network=ic; port=4943; out=dist
+key="$HOME/.ssh/id_ed25519.pub"
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo)         repo=$2; shift 2 ;;
+    --signing-key)  key=$2; shift 2 ;;
     --git-canister) git_id=$2; shift 2 ;;
     --network)      network=$2; shift 2 ;;
     --port)         port=$2; shift 2 ;;
-    -h|--help)      sed -n '2,25p' "$0"; exit 0 ;;
+    -h|--help)      sed -n '2,39p' "$0"; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
-[ -n "$repo" ] || { echo "usage: tools/push-ic-git.sh --repo NAME [--git-canister ID] [--network ic|local] [--port N]" >&2; exit 2; }
+[ -n "$repo" ] || { echo "usage: tools/push-ic-git.sh --repo NAME [--signing-key PATH] [--git-canister ID] [--network ic|local] [--port N]" >&2; exit 2; }
 case "$network" in
   ic)    git_id=${git_id:-umobs-yiaaa-aaaab-agyrq-cai}; scheme=https; host="$git_id.raw.icp0.io" ;;
   local) [ -n "$git_id" ] || { echo "--git-canister is required with --network local" >&2; exit 2; }
@@ -74,6 +89,20 @@ if [ "$cfg_path" != "app.wasm" ] || [ "$cfg_target" != "$app" ]; then
   echo "Set it in the console before pushing, or the push lands and installs nothing." >&2; exit 1
 fi
 echo "deploy on push  : app.wasm -> $app"
+votes=$(printf '%s' "$info" | jget required_votes)
+signed_only=$(printf '%s' "$info" | jget require_signed_push)
+echo "required votes  : ${votes:-0}"
+echo "signed pushes   : $([ "$signed_only" = true ] && echo required || echo "not required (this script signs anyway)")"
+
+say "signing key"
+[ -f "$key" ] || { echo "no signing key at $key. Make one with: ssh-keygen -t ed25519 (or pass --signing-key PATH)" >&2; exit 1; }
+case "$(cut -d' ' -f1 "$key")" in
+  ssh-ed25519) ;;
+  *) echo "$key is not an ssh-ed25519 public key; ic-git verifies only ed25519 push certificates" >&2; exit 1 ;;
+esac
+fpr=$(ssh-keygen -lf "$key" | cut -d' ' -f2)
+echo "key             : $fpr ($key)"
+echo "                  the push token must be bound to this key"
 
 say "push token"
 if [ -z "${IC_GIT_TOKEN:-}" ]; then
@@ -120,12 +149,15 @@ app.wasm sha256 $wasm_sha" >/dev/null 2>&1; then
   # environment. The empty helper first clears any configured helper, so
   # the OS keychain is neither asked nor offered the token to store, and
   # GIT_TERMINAL_PROMPT=0 makes a refused token fail instead of prompting.
+  # --signed, not push.gpgSign=if-asked: if ic-git ever stopped offering
+  # a nonce, the push fails here instead of quietly going unsigned.
   export IC_GIT_TOKEN
   GIT_TERMINAL_PROMPT=0 git -C "$out" \
     -c credential.helper= \
     -c credential.helper='!f() { cat >/dev/null; [ "$1" = get ] || exit 0; printf "username=ic\npassword=%s\n" "$IC_GIT_TOKEN"; }; f' \
-    push -q "$origin/$repo.git" main
-  echo "pushed $commit"
+    -c gpg.format=ssh -c user.signingkey="$key" \
+    push -q --signed "$origin/$repo.git" main
+  echo "pushed $commit (signed by $fpr)"
 else
   commit=$(git -C "$out" rev-parse HEAD)
   echo "nothing new: $commit is already the tip on ic-git"
@@ -133,16 +165,31 @@ fi
 
 say "deploy"
 # Success is a status for the commit just pushed, not any ok: a previous
-# run's result would otherwise pass while this push is still queued.
-st_commit=""; st_ok=""; st_msg=""
-for _ in $(seq 1 60); do
+# run's result would otherwise pass while this push is still queued. A
+# commit held for votes is not a failure: approving it queues its deploy,
+# so the wait is extended (to 30 minutes) while someone approves it.
+st_commit=""; st_ok=""; st_msg=""; held=""
+tries=60
+i=0
+while [ "$i" -lt "$tries" ]; do
+  i=$((i + 1))
   d=$(api "$repo/deploys" 2>/dev/null || echo '{}')
   st_commit=$(printf '%s' "$d" | jget status.commit)
   st_ok=$(printf '%s' "$d" | jget status.ok)
   st_msg=$(printf '%s' "$d" | jget status.message)
   if [ "$st_commit" = "$commit" ]; then
     if [ "$st_ok" = "true" ]; then break; fi
-    if [ "$st_msg" != "deploying" ]; then echo "deploy failed: $st_msg" >&2; exit 1; fi
+    case "$st_msg" in
+      deploying) ;;
+      "awaiting voter approval"*)
+        if [ -z "$held" ]; then
+          held=1; tries=900
+          echo "held for approval: $repo requires ${votes:-some} vote(s) before this commit deploys or is served."
+          echo "  approve $commit on its commit page in the console, or call vote(\"$repo\", \"$commit\", true)."
+          echo "  waiting up to 30 minutes; ^C is safe, the push has landed and a re-run resumes the wait."
+        fi ;;
+      *) echo "deploy failed: $st_msg" >&2; exit 1 ;;
+    esac
   fi
   sleep 2
 done

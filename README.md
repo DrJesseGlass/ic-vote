@@ -34,20 +34,37 @@ ic-git interface to be real and is the first evidence the stack works for
 someone who is not ic-git.
 
 This repo is therefore meant to be pushed to and served from ic-git, not
-deployed by hand. Two scripts do it, and neither needs dfx or a key:
-everything a wallet can do is done in the ic-git console, signed in as
-the wallet that owns the repo -- create the repo, create its app canister,
-set "deploy on push" to `app.wasm`, set "serve as site" to `site`, mint a
-push token -- and `tools/push-ic-git.sh --repo NAME` does the rest with
-the token: it stages `dist/` (`tools/stage-ic-git.sh`: `app.wasm` for
-the deploy queue; `site/` rendered for that deployment, with the poll
-canister's id in `config.js`, the page's modules linked into one `app.js`,
-and an `integrity` hash on each file `index.html` loads, so that hash
-covers every byte the page runs; and the sources and pinned toolchain that
-reproduce the wasm), commits it
-on top of the repo's tip, pushes, and watches `/api/NAME/deploys` until
-the install reports. The ballot page is then at `/site/NAME/` on ic-git
-and the poll canister is the repo's app canister.
+deployed by hand, and nothing in it needs dfx. Everything a wallet can do
+is done in the ic-git console, signed in as the wallet that owns the
+repo: create the repo, create its app canister, set "deploy on push" to
+`app.wasm`, set "serve as site" to `site`, and mint a push token bound to
+an SSH key (`ssh-keygen -t ed25519`; paste the `.pub` into the token's
+key field). The one key on this side is that SSH key.
+
+`tools/push-ic-git.sh --repo NAME` does the rest with that token. It
+stages `dist/` with `tools/stage-ic-git.sh`, which holds three things:
+`app.wasm` for the deploy queue; `site/`, rendered for this deployment;
+and the sources and pinned toolchain that reproduce the wasm. Rendering
+writes the poll canister's id into `config.js`, links the page's modules
+into one `app.js`, and puts an `integrity` hash on each file `index.html`
+loads, so the page's hash covers every byte it runs. The script then
+commits `dist/` on top of the repo's tip, pushes it signed, and watches
+`/api/NAME/deploys` until the install reports.
+
+Every push carries a git push certificate signed with the SSH key
+(`--signing-key`, default `~/.ssh/id_ed25519.pub`; ic-git accepts only
+ed25519). It binds the ref update to a nonce ic-git issued, and a token
+bound to the key accepts no push the key did not sign, so a leaked token
+alone cannot push. Two console settings make this the repo's rule rather
+than the script's habit: "require signed pushes" refuses unbound tokens
+too, and required votes set to 1 holds each push until a voter approves
+it. A held push neither deploys nor is served; the site stays on the last
+approved commit. The script names the commit to approve and waits.
+
+The ballot page is then at `/site/NAME/` on ic-git, and the poll canister
+is the repo's app canister. Last, "publish site record to the EVM
+registry" in the console attests the served page on chain as `NAME#site`;
+with votes required, that is the approved page.
 
 ## Documents
 
