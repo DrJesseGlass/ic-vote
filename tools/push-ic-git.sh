@@ -30,13 +30,18 @@
 #      otherwise the push would land and install nothing, silently.
 #   3. The signing key must be an ssh-ed25519 public key.
 #   4. tools/stage-ic-git.sh produces dist/.
-#   5. dist/ is committed on top of the repo's current tip and pushed
-#      signed. ic-git refuses anything but a fast-forward, so a stale local
-#      copy is refused rather than merged.
+#   5. dist/ is committed on top of the repo's current tip. Only when that
+#      makes a new commit are the token (and, while signing, the key's
+#      passphrase) asked for, and it is pushed signed. ic-git refuses
+#      anything but a fast-forward, so a stale local copy is refused rather
+#      than merged. When the tip already matches, nothing is asked and the
+#      run goes straight to watching, which is how to resume a wait.
 #   6. /api/NAME/deploys is polled until the deploy of that commit reports,
 #      and /site/NAME/ is checked to be serving it. When the repo requires
 #      votes, the deploy is held until a voter approves the commit; the
-#      script says which commit and waits for the approval.
+#      script says which commit, reports each vote cast on it from
+#      /api/NAME/votes/COMMIT, and warns if none has arrived after five
+#      minutes -- the usual cause being an approval of a different commit.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -49,7 +54,7 @@ while [ $# -gt 0 ]; do
     --git-canister) git_id=$2; shift 2 ;;
     --network)      network=$2; shift 2 ;;
     --port)         port=$2; shift 2 ;;
-    -h|--help)      sed -n '2,39p' "$0"; exit 0 ;;
+    -h|--help)      awk 'NR > 1 && !/^#/ { exit } NR > 1' "$0"; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -64,6 +69,13 @@ origin="$scheme://$host"
 
 say() { printf '\n== %s\n' "$*"; }
 api() { curl -sS -f -A ic-vote-push "$origin/api/$1"; }
+# A push token is lowercase hex; anything else is refused before it is sent.
+check_token() {
+  [ -n "$1" ] || { echo "no token given" >&2; exit 1; }
+  case "$1" in
+    *[!0-9a-f]*) echo "that is not a push token (lowercase hex)" >&2; exit 1 ;;
+  esac
+}
 # One field of a JSON document on stdin, by dotted path; empty when absent.
 # node is already required by the staging step.
 jget() {
@@ -104,15 +116,8 @@ fpr=$(ssh-keygen -lf "$key" | cut -d' ' -f2)
 echo "key             : $fpr ($key)"
 echo "                  the push token must be bound to this key"
 
-say "push token"
-if [ -z "${IC_GIT_TOKEN:-}" ]; then
-  read -rs -p "token for '$repo', minted in the console (not echoed): " IC_GIT_TOKEN; echo
-fi
-[ -n "$IC_GIT_TOKEN" ] || { echo "no token given" >&2; exit 1; }
-case "$IC_GIT_TOKEN" in
-  *[!0-9a-f]*) echo "that is not a push token (lowercase hex)" >&2; exit 1 ;;
-esac
-echo "ok"
+# A token already in the environment is checked now, not after staging.
+[ -z "${IC_GIT_TOKEN:-}" ] || check_token "$IC_GIT_TOKEN"
 
 say "stage"
 tools/stage-ic-git.sh --poll-canister "$app" --git-canister "$git_id" --out "$out" >/dev/null
@@ -141,6 +146,12 @@ source   ic-vote $src
 poll     $app
 app.wasm sha256 $wasm_sha" >/dev/null 2>&1; then
   commit=$(git -C "$out" rev-parse HEAD)
+  echo "new commit      : $commit"
+  # Asked for only now: a run that has nothing to push needs no token.
+  if [ -z "${IC_GIT_TOKEN:-}" ]; then
+    read -rs -p "token for '$repo', minted in the console (not echoed): " IC_GIT_TOKEN; echo
+  fi
+  check_token "$IC_GIT_TOKEN"
   # The token is the credential, and it stays out of every argument list.
   # A command line is readable by every process on the machine (ps, /proc)
   # for as long as the push runs; a child's environment is readable only
@@ -160,15 +171,29 @@ app.wasm sha256 $wasm_sha" >/dev/null 2>&1; then
   echo "pushed $commit (signed by $fpr)"
 else
   commit=$(git -C "$out" rev-parse HEAD)
-  echo "nothing new: $commit is already the tip on ic-git"
+  echo "nothing new: $commit is already the tip on ic-git; no token needed"
 fi
 
 say "deploy"
 # Success is a status for the commit just pushed, not any ok: a previous
 # run's result would otherwise pass while this push is still queued. A
 # commit held for votes is not a failure: approving it queues its deploy,
-# so the wait is extended (to 30 minutes) while someone approves it.
-st_commit=""; st_ok=""; st_msg=""; held=""
+# so the wait is extended (to 30 minutes) while someone approves it. While
+# held, the commit's ballots are read every 10 seconds: each change is
+# reported, and five minutes with none says so, since the likeliest reason
+# is an approval cast on another commit's page.
+st_commit=""; st_ok=""; st_msg=""; held=""; held_at=0; tally=""; quiet_warned=""
+# "<approvals> <rejections>" among the ballots on one commit, or nothing
+# when the read fails: a failed read is skipped, not taken as zero votes
+# (which would report votes vanishing and could raise the no-vote warning),
+# and it does not fail the pipeline, which under pipefail would end a wait
+# that is otherwise fine.
+ballots() {
+  { api "$repo/votes/$1" 2>/dev/null || true; } | node -e '
+    let a = 0, r = 0;
+    try { for (const b of JSON.parse(require("fs").readFileSync(0, "utf8"))) b.approve ? a++ : r++; } catch (e) { process.exit(0); }
+    process.stdout.write(a + " " + r);'
+}
 tries=60
 i=0
 while [ "$i" -lt "$tries" ]; do
@@ -183,16 +208,46 @@ while [ "$i" -lt "$tries" ]; do
       deploying) ;;
       "awaiting voter approval"*)
         if [ -z "$held" ]; then
-          held=1; tries=900
+          held=1; held_at=$SECONDS; tries=$((i + 900))
           echo "held for approval: $repo requires ${votes:-some} vote(s) before this commit deploys or is served."
           echo "  approve $commit on its commit page in the console, or call vote(\"$repo\", \"$commit\", true)."
           echo "  waiting up to 30 minutes; ^C is safe, the push has landed and a re-run resumes the wait."
+        fi
+        if [ $((i % 5)) -eq 1 ] || [ -z "$tally" ]; then
+          now=$(ballots "$commit")
+          if [ -n "$now" ] && [ "$now" != "$tally" ]; then
+            tally=$now
+            echo "votes           : ${now% *} approve, ${now#* } reject, ${votes:-?} required"
+          fi
+          # Only a successful read says there are no votes: an empty tally
+          # means every read so far failed, and that is reported as such.
+          if [ -z "$quiet_warned" ] && [ $((SECONDS - held_at)) -ge 300 ]; then
+            if [ "$tally" = "0 0" ]; then
+              quiet_warned=1
+              echo "  no vote on $commit after 5 minutes. If you approved, it went to another" >&2
+              echo "  commit: the page you approve on must show this id in its header." >&2
+            elif [ -z "$tally" ]; then
+              quiet_warned=1
+              echo "  could not read the votes on $commit for 5 minutes (/api/$repo/votes/...);" >&2
+              echo "  still waiting on the deploy status, which a vote would change." >&2
+            fi
+          fi
         fi ;;
       *) echo "deploy failed: $st_msg" >&2; exit 1 ;;
     esac
   fi
   sleep 2
 done
+if [ -n "$held" ] && [ "$st_commit" = "$commit" ] && [ "$st_ok" != "true" ] \
+    && case "$st_msg" in "awaiting voter approval"*) true ;; *) false ;; esac; then
+  if [ -n "$tally" ]; then
+    echo "still held after 30 minutes: $commit has ${tally% *} approve, ${tally#* } reject, ${votes:-?} required." >&2
+  else
+    echo "still held after 30 minutes: $commit needs ${votes:-?} vote(s); its votes could not be read." >&2
+  fi
+  echo "The push has landed. Approve it, then re-run to watch the deploy; nothing is asked when there is nothing to push." >&2
+  exit 1
+fi
 if [ "$st_commit" != "$commit" ] || [ "$st_ok" != "true" ]; then
   echo "timed out waiting for the deploy of $commit; last status: '${st_msg:-none}' for '${st_commit:-none}'" >&2; exit 1
 fi
