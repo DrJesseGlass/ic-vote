@@ -59,7 +59,9 @@ alone cannot push. Two console settings make this the repo's rule rather
 than the script's habit: "require signed pushes" refuses unbound tokens
 too, and required votes set to 1 holds each push until a voter approves
 it. A held push neither deploys nor is served; the site stays on the last
-approved commit. The script names the commit to approve and waits.
+approved commit. The script names the commit to approve, reports each
+vote cast on it, and waits; a re-run with nothing new to push asks for no
+token and resumes the wait.
 
 The ballot page is then at `/site/NAME/` on ic-git, and the poll canister
 is the repo's app canister. Last, "publish site record to the EVM
