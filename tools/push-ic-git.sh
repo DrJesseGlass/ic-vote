@@ -219,10 +219,18 @@ while [ "$i" -lt "$tries" ]; do
             tally=$now
             echo "votes           : ${now% *} approve, ${now#* } reject, ${votes:-?} required"
           fi
-          if [ -z "$quiet_warned" ] && [ "${tally:-0 0}" = "0 0" ] && [ $((SECONDS - held_at)) -ge 300 ]; then
-            quiet_warned=1
-            echo "  no vote on $commit after 5 minutes. If you approved, it went to another" >&2
-            echo "  commit: the page you approve on must show this id in its header." >&2
+          # Only a successful read says there are no votes: an empty tally
+          # means every read so far failed, and that is reported as such.
+          if [ -z "$quiet_warned" ] && [ $((SECONDS - held_at)) -ge 300 ]; then
+            if [ "$tally" = "0 0" ]; then
+              quiet_warned=1
+              echo "  no vote on $commit after 5 minutes. If you approved, it went to another" >&2
+              echo "  commit: the page you approve on must show this id in its header." >&2
+            elif [ -z "$tally" ]; then
+              quiet_warned=1
+              echo "  could not read the votes on $commit for 5 minutes (/api/$repo/votes/...);" >&2
+              echo "  still waiting on the deploy status, which a vote would change." >&2
+            fi
           fi
         fi ;;
       *) echo "deploy failed: $st_msg" >&2; exit 1 ;;
@@ -232,8 +240,11 @@ while [ "$i" -lt "$tries" ]; do
 done
 if [ -n "$held" ] && [ "$st_commit" = "$commit" ] && [ "$st_ok" != "true" ] \
     && case "$st_msg" in "awaiting voter approval"*) true ;; *) false ;; esac; then
-  t=${tally:-0 0}
-  echo "still held after 30 minutes: $commit has ${t% *} approve, ${t#* } reject, ${votes:-?} required." >&2
+  if [ -n "$tally" ]; then
+    echo "still held after 30 minutes: $commit has ${tally% *} approve, ${tally#* } reject, ${votes:-?} required." >&2
+  else
+    echo "still held after 30 minutes: $commit needs ${votes:-?} vote(s); its votes could not be read." >&2
+  fi
   echo "The push has landed. Approve it, then re-run to watch the deploy; nothing is asked when there is nothing to push." >&2
   exit 1
 fi
