@@ -62,13 +62,32 @@ export function hostFor(url) {
   return "http://127.0.0.1:4943";
 }
 
-/// Overridable from the page URL for local development ONLY.
+/// True for a page served from this machine: localhost, a *.localhost
+/// gateway (a dfx replica), or a loopback address. Anything else, including
+/// a page with no URL, is not local.
+export function isLocal(url) {
+  try {
+    const h = new URL(url).hostname;
+    return h === "localhost" || h.endsWith(".localhost") || h === "127.0.0.1" || h === "[::1]";
+  } catch {
+    return false;
+  }
+}
+
+/// Overridable from the page URL for local development ONLY, and so honored
+/// only on a page served locally (isLocal of pageURL, so a page a verifier
+/// runs under <base> is judged by where it was served, not by the
+/// verifier's origin).
 ///
 /// Note what is and is not overridable: the canister and host can be pointed
 /// at a local replica, but the trusted verifier set and K cannot, because a
 /// URL parameter that could weaken the trust anchors would be a phishing
 /// primitive -- send a voter a link with K=0 and the page renders confident.
-export function configFromLocation(loc) {
+/// The same holds for the canister and host on a deployed page: a link with
+/// ?canister=<theirs> would hand a voter's page to someone else's poll
+/// canister, so off this machine the parameters are ignored.
+export function configFromLocation(loc, served = pageURL()) {
+  if (!isLocal(served)) return { ...config };
   const params = new URLSearchParams(loc?.search ?? "");
   return {
     ...config,

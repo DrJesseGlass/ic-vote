@@ -37,7 +37,7 @@ import * as candid from "../site/lib/candid.js";
 import { Agent, Ed25519Identity, requestId } from "../site/lib/agent.js";
 import { certifiedData, parseCertificate, hashTree } from "../site/lib/certificate.js";
 import * as eh from "../site/lib/election-hash.js";
-import { hostFor, pageURL } from "../site/config.js";
+import { config, configFromLocation, hostFor, isLocal, pageURL } from "../site/config.js";
 import {
   computeVerdict,
   GREEN,
@@ -457,6 +457,26 @@ group("page host (config.js)", () => {
       if (d) Object.defineProperty(globalThis, k, d); else delete globalThis[k];
     }
   }
+});
+
+group("development overrides only on a local page (config.js)", () => {
+  for (const u of ["http://localhost:8080/", "http://umobs.raw.localhost:4943/site/ic-vote/", "http://127.0.0.1:4943/", "http://[::1]:4943/"]) {
+    check(`local: ${u}`, isLocal(u), true);
+  }
+  for (const u of ["https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/ic-vote/", "https://localhost.evil.example/", "https://127.0.0.1.evil.example/", "file:///Users/someone/loader.html", "", null]) {
+    check(`not local: ${u}`, isLocal(u), false);
+  }
+  const link = { search: "?canister=aaaaa-aa&host=https://evil.example" };
+  const deployed = configFromLocation(link, "https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/ic-vote/");
+  check("a deployed page ignores ?canister=", deployed.pollCanisterId, config.pollCanisterId);
+  check("a deployed page ignores ?host=", deployed.host, config.host);
+  const local = configFromLocation(link, "http://umobs.raw.localhost:4943/site/ic-vote/");
+  check("a local page takes ?canister=", local.pollCanisterId, "aaaaa-aa");
+  check("a local page takes ?host=", local.host, "https://evil.example");
+  // Under a verifier's <base> the served URL decides, even when the
+  // verifier itself was opened from localhost.
+  check("run under the loader: judged by the served URL", configFromLocation(link, "https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/ic-vote/").pollCanisterId, config.pollCanisterId);
+  check("the trust anchors are never overridable", configFromLocation({ search: "?K=0" }, "http://localhost/").trusted, config.trusted);
 });
 
 await group("site module graph", async () => {

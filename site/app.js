@@ -44,7 +44,8 @@ async function boot() {
     $("setup").classList.remove("hidden");
     $("setup-detail").textContent =
       "No poll canister configured. Set pollCanisterId in config.js, or append " +
-      "?canister=<id>&host=<replica> for local development.";
+      "?canister=<id>&host=<replica> to a page served locally (the parameters " +
+      "are ignored anywhere else).";
     renderVerdict({ verdict: RED, checks: [], warnings: [], ballot: "blocked" },
       "No canister configured, so there is nothing to verify.");
     return;
