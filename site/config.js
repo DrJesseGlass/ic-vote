@@ -55,7 +55,8 @@ export function pageURL() {
 /// The IC API for a page served from `url` (null, or not a URL: local).
 export function hostFor(url) {
   try {
-    if (new URL(url).hostname.endsWith("icp0.io")) return "https://icp-api.io";
+    const h = new URL(url).hostname;
+    if (h === "icp0.io" || h.endsWith(".icp0.io")) return "https://icp-api.io";
   } catch {
     // not a URL: fall through to the replica
   }
@@ -68,7 +69,7 @@ export function hostFor(url) {
 export function isLocal(url) {
   try {
     const h = new URL(url).hostname;
-    return h === "localhost" || h.endsWith(".localhost") || h === "127.0.0.1" || h === "[::1]";
+    return h === "localhost" || h.endsWith(".localhost") || /^127\.\d+\.\d+\.\d+$/.test(h) || h === "[::1]";
   } catch {
     return false;
   }

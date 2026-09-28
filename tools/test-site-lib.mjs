@@ -427,13 +427,23 @@ group("verdict rules", () => {
     computeVerdict({ ...healthy, trusted: { verifiers: [], K: 0 } }).verdict, RED);
 });
 
-// --- the module graph -----------------------------------------------------
-//
-// app.js is the one file here with no unit tests: it is all DOM wiring, and a
-// DOM shim faithful enough to test it would be a bigger thing to trust than
-// the file itself. What CAN be checked without a browser is that it parses and
-// that every symbol it imports actually exists -- which is where a rename or a
-// typo would otherwise sit undetected until a voter loaded the page.
+// --- config.js ------------------------------------------------------------
+
+// Run fn with the browser globals pageURL reads set to a page at `href` whose
+// document.baseURI is `baseURI` (undefined: a document without one).
+function withPage(href, baseURI, fn) {
+  const saved = { document: Object.getOwnPropertyDescriptor(globalThis, "document"), location: Object.getOwnPropertyDescriptor(globalThis, "location") };
+  const set = (k, v) => Object.defineProperty(globalThis, k, { value: v, configurable: true, writable: true });
+  try {
+    set("location", { href });
+    set("document", baseURI === undefined ? {} : { baseURI });
+    return fn();
+  } finally {
+    for (const [k, d] of Object.entries(saved)) {
+      if (d) Object.defineProperty(globalThis, k, d); else delete globalThis[k];
+    }
+  }
+}
 
 group("page host (config.js)", () => {
   check("served from an icp0.io gateway: mainnet", hostFor("https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/ic-vote/"), "https://icp-api.io");
@@ -441,26 +451,20 @@ group("page host (config.js)", () => {
   check("a lookalike host is not icp0.io's", hostFor("https://icp0.io.evil.example/"), "http://127.0.0.1:4943");
   check("no URL: the replica", hostFor(null), "http://127.0.0.1:4943");
   check("not a URL: the replica", hostFor(""), "http://127.0.0.1:4943");
+  check("a name merely ending in icp0.io is not icp0.io's", hostFor("https://evilicp0.io/"), "http://127.0.0.1:4943");
   // Under ic-git's loader the page runs on the loader's origin with <base> at
   // the served URL: the base, not location, says where it came from.
-  const saved = { document: Object.getOwnPropertyDescriptor(globalThis, "document"), location: Object.getOwnPropertyDescriptor(globalThis, "location") };
-  const set = (k, v) => Object.defineProperty(globalThis, k, { value: v, configurable: true, writable: true });
-  try {
-    set("location", { href: "file:///Users/someone/loader.html?repo=ic-vote" });
-    set("document", { baseURI: "https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/ic-vote/" });
+  withPage("file:///Users/someone/loader.html?repo=ic-vote", "https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/ic-vote/", () => {
     check("pageURL prefers document.baseURI to location", pageURL(), "https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/ic-vote/");
     check("...so the loaded page talks to mainnet", hostFor(pageURL()), "https://icp-api.io");
-    set("document", {});
+  });
+  withPage("file:///Users/someone/loader.html?repo=ic-vote", undefined, () => {
     check("without a baseURI, location", pageURL(), "file:///Users/someone/loader.html?repo=ic-vote");
-  } finally {
-    for (const [k, d] of Object.entries(saved)) {
-      if (d) Object.defineProperty(globalThis, k, d); else delete globalThis[k];
-    }
-  }
+  });
 });
 
 group("development overrides only on a local page (config.js)", () => {
-  for (const u of ["http://localhost:8080/", "http://umobs.raw.localhost:4943/site/ic-vote/", "http://127.0.0.1:4943/", "http://[::1]:4943/"]) {
+  for (const u of ["http://localhost:8080/", "http://umobs.raw.localhost:4943/site/ic-vote/", "http://127.0.0.1:4943/", "http://127.0.0.2:8080/", "http://[::1]:4943/"]) {
     check(`local: ${u}`, isLocal(u), true);
   }
   for (const u of ["https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/ic-vote/", "https://localhost.evil.example/", "https://127.0.0.1.evil.example/", "file:///Users/someone/loader.html", "", null]) {
@@ -475,9 +479,22 @@ group("development overrides only on a local page (config.js)", () => {
   check("a local page takes ?host=", local.host, "https://evil.example");
   // Under a verifier's <base> the served URL decides, even when the
   // verifier itself was opened from localhost.
-  check("run under the loader: judged by the served URL", configFromLocation(link, "https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/ic-vote/").pollCanisterId, config.pollCanisterId);
-  check("the trust anchors are never overridable", configFromLocation({ search: "?K=0" }, "http://localhost/").trusted, config.trusted);
+  withPage("http://localhost:8080/loader.html?canister=aaaaa-aa", "https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/ic-vote/", () => {
+    check("run under the loader: judged by the served URL", configFromLocation(link).pollCanisterId, config.pollCanisterId);
+  });
+  // Nothing but canister and host moves: with neither given, a local page's
+  // config is exactly the file's, whatever else the link carries.
+  check("the trust anchors are never overridable",
+    configFromLocation({ search: "?K=0&verifiers=0xabc&trusted=x&rpc=x" }, "http://localhost/"), config);
 });
+
+// --- the module graph -----------------------------------------------------
+//
+// app.js is the one file here with no unit tests: it is all DOM wiring, and a
+// DOM shim faithful enough to test it would be a bigger thing to trust than
+// the file itself. What CAN be checked without a browser is that it parses and
+// that every symbol it imports actually exists -- which is where a rename or a
+// typo would otherwise sit undetected until a voter loaded the page.
 
 await group("site module graph", async () => {
   const siteDir = new URL("../site/", import.meta.url);
