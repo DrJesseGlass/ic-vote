@@ -6,7 +6,7 @@
 // set alongside it. A layout where the ballot is present and later disabled
 // has a window in which it is present and enabled.
 
-import { configFromLocation } from "./config.js";
+import { configFromURL, pageURL } from "./config.js";
 import { Agent, Ed25519Identity } from "./lib/agent.js";
 import { toHex, fromHex } from "./lib/sha256.js";
 import * as prov from "./lib/provenance.js";
@@ -39,12 +39,13 @@ const state = {
 // --- boot -----------------------------------------------------------------
 
 async function boot() {
-  state.config = configFromLocation(typeof location !== "undefined" ? location : null);
+  state.config = configFromURL();
   if (!state.config.pollCanisterId) {
     $("setup").classList.remove("hidden");
     $("setup-detail").textContent =
       "No poll canister configured. Set pollCanisterId in config.js, or append " +
-      "?canister=<id>&host=<replica> for local development.";
+      "?canister=<id>&host=<replica> to a page served locally (the parameters " +
+      "are ignored anywhere else).";
     renderVerdict({ verdict: RED, checks: [], warnings: [], ballot: "blocked" },
       "No canister configured, so there is nothing to verify.");
     return;
@@ -200,7 +201,7 @@ function describeError(err) {
 async function verifyProvenance(seq = state.loadSeq) {
   const pin = state.current?.manifest?.pin ?? null;
 
-  const served = await attempt(() => prov.servedBundle(new URL("./index.html", location.href).href));
+  const served = await attempt(() => prov.servedBundle(new URL("./index.html", pageURL()).href));
   const registryRecord = pin
     ? await attempt(async () => {
         const rpc = state.config.rpc[Number(pin.registry_chain_id)];

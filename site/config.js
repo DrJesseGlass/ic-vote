@@ -11,12 +11,9 @@
 // Reviewers: the addresses below are as load-bearing as any line of code here.
 
 export const config = {
-  /// Where to talk to the IC. On a deployed frontend this is the origin the
-  /// page came from; locally it is the replica.
-  host:
-    typeof location !== "undefined" && location.hostname.endsWith("icp0.io")
-      ? "https://icp-api.io"
-      : "http://127.0.0.1:4943",
+  /// Where to talk to the IC: mainnet when the page came from an icp0.io
+  /// gateway, the local replica otherwise. See pageURL for "came from".
+  host: hostFor(pageURL()),
 
   /// The poll canister holding elections. Set at deploy time.
   pollCanisterId: null,
@@ -46,14 +43,54 @@ export const config = {
   },
 };
 
-/// Overridable from the page URL for local development ONLY.
+/// The URL this page was served from. document.baseURI rather than location:
+/// the two are the same when the page is served directly, but a verifier
+/// that runs the checked bytes on its own origin (ic-git's loader) sets
+/// <base> to the served URL, and location is then the verifier's page.
+export function pageURL() {
+  if (typeof document !== "undefined" && typeof document.baseURI === "string") return document.baseURI;
+  return typeof location !== "undefined" ? location.href : null;
+}
+
+/// The IC API for a page served from `url` (null, or not a URL: local).
+export function hostFor(url) {
+  try {
+    const h = new URL(url).hostname;
+    if (h === "icp0.io" || h.endsWith(".icp0.io")) return "https://icp-api.io";
+  } catch {
+    // not a URL: fall through to the replica
+  }
+  return "http://127.0.0.1:4943";
+}
+
+/// True for a page served from this machine: localhost, a *.localhost
+/// gateway (a dfx replica), or a loopback address. Anything else, including
+/// a page with no URL, is not local.
+export function isLocal(url) {
+  try {
+    const h = new URL(url).hostname;
+    return h === "localhost" || h.endsWith(".localhost") || /^127\.\d+\.\d+\.\d+$/.test(h) || h === "[::1]";
+  } catch {
+    return false;
+  }
+}
+
+/// Overridable from the page URL for local development ONLY, and so honored
+/// only on a page served locally. Both the check and the parameters come from
+/// the one URL, pageURL by default: a page a verifier runs under <base> is
+/// judged by, and configured from, where it was served, not the verifier's
+/// own page.
 ///
 /// Note what is and is not overridable: the canister and host can be pointed
 /// at a local replica, but the trusted verifier set and K cannot, because a
 /// URL parameter that could weaken the trust anchors would be a phishing
 /// primitive -- send a voter a link with K=0 and the page renders confident.
-export function configFromLocation(loc) {
-  const params = new URLSearchParams(loc?.search ?? "");
+/// The same holds for the canister and host on a deployed page: a link with
+/// ?canister=<theirs> would hand a voter's page to someone else's poll
+/// canister, so off this machine the parameters are ignored.
+export function configFromURL(url = pageURL()) {
+  if (!isLocal(url)) return { ...config };
+  const params = new URL(url).searchParams;
   return {
     ...config,
     host: params.get("host") ?? config.host,

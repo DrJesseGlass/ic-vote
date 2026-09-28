@@ -37,6 +37,7 @@ import * as candid from "../site/lib/candid.js";
 import { Agent, Ed25519Identity, requestId } from "../site/lib/agent.js";
 import { certifiedData, parseCertificate, hashTree } from "../site/lib/certificate.js";
 import * as eh from "../site/lib/election-hash.js";
+import { config, configFromURL, hostFor, isLocal, pageURL } from "../site/config.js";
 import {
   computeVerdict,
   GREEN,
@@ -424,6 +425,76 @@ group("verdict rules", () => {
   check("an election with no pin -> RED", computeVerdict({ ...healthy, pin: null }).verdict, RED);
   check("K = 0 is a configuration error, not a pass",
     computeVerdict({ ...healthy, trusted: { verifiers: [], K: 0 } }).verdict, RED);
+});
+
+// --- config.js ------------------------------------------------------------
+
+// Run fn with the browser globals pageURL reads set to a page at `href` whose
+// document.baseURI is `baseURI` (undefined: a document without one).
+function withPage(href, baseURI, fn) {
+  const saved = { document: Object.getOwnPropertyDescriptor(globalThis, "document"), location: Object.getOwnPropertyDescriptor(globalThis, "location") };
+  const set = (k, v) => Object.defineProperty(globalThis, k, { value: v, configurable: true, writable: true });
+  try {
+    set("location", { href });
+    set("document", baseURI === undefined ? {} : { baseURI });
+    return fn();
+  } finally {
+    for (const [k, d] of Object.entries(saved)) {
+      if (d) Object.defineProperty(globalThis, k, d); else delete globalThis[k];
+    }
+  }
+}
+
+group("page host (config.js)", () => {
+  check("served from an icp0.io gateway: mainnet", hostFor("https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/ic-vote/"), "https://icp-api.io");
+  check("a local gateway: the replica", hostFor("http://umobs.raw.localhost:4943/site/ic-vote/"), "http://127.0.0.1:4943");
+  check("a lookalike host is not icp0.io's", hostFor("https://icp0.io.evil.example/"), "http://127.0.0.1:4943");
+  check("no URL: the replica", hostFor(null), "http://127.0.0.1:4943");
+  check("not a URL: the replica", hostFor(""), "http://127.0.0.1:4943");
+  check("a name merely ending in icp0.io is not icp0.io's", hostFor("https://evilicp0.io/"), "http://127.0.0.1:4943");
+  // Under ic-git's loader the page runs on the loader's origin with <base> at
+  // the served URL: the base, not location, says where it came from.
+  withPage("file:///Users/someone/loader.html?repo=ic-vote", "https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/ic-vote/", () => {
+    check("pageURL prefers document.baseURI to location", pageURL(), "https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/ic-vote/");
+    check("...so the loaded page talks to mainnet", hostFor(pageURL()), "https://icp-api.io");
+  });
+  withPage("file:///Users/someone/loader.html?repo=ic-vote", undefined, () => {
+    check("without a baseURI, location", pageURL(), "file:///Users/someone/loader.html?repo=ic-vote");
+  });
+});
+
+group("development overrides only on a local page (config.js)", () => {
+  for (const u of ["http://localhost:8080/", "http://umobs.raw.localhost:4943/site/ic-vote/", "http://127.0.0.1:4943/", "http://127.0.0.2:8080/", "http://[::1]:4943/"]) {
+    check(`local: ${u}`, isLocal(u), true);
+  }
+  for (const u of ["https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/ic-vote/", "https://localhost.evil.example/", "https://127.0.0.1.evil.example/", "file:///Users/someone/loader.html", "", null]) {
+    check(`not local: ${u}`, isLocal(u), false);
+  }
+  const q = "?canister=aaaaa-aa&host=https://evil.example";
+  const deployed = configFromURL("https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/ic-vote/" + q);
+  check("a deployed page ignores ?canister=", deployed.pollCanisterId, config.pollCanisterId);
+  check("a deployed page ignores ?host=", deployed.host, config.host);
+  const local = configFromURL("http://umobs.raw.localhost:4943/site/ic-vote/" + q);
+  check("a local page takes ?canister=", local.pollCanisterId, "aaaaa-aa");
+  check("a local page takes ?host=", local.host, "https://evil.example");
+  // Under a verifier's <base> the served URL decides, and is where the
+  // parameters are read, even when the verifier itself was opened from
+  // localhost.
+  withPage("http://localhost:8080/loader.html" + q, "https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/ic-vote/", () => {
+    check("under the loader, a deployed page ignores the loader's ?canister=", configFromURL().pollCanisterId, config.pollCanisterId);
+  });
+  withPage("http://localhost:8080/loader.html", "http://umobs.raw.localhost:4943/site/ic-vote/" + q, () => {
+    check("under the loader, a local page takes the served URL's ?canister=", configFromURL().pollCanisterId, "aaaaa-aa");
+    check("...and its ?host=", configFromURL().host, "https://evil.example");
+  });
+  withPage("http://localhost:8080/loader.html" + q, "http://umobs.raw.localhost:4943/site/ic-vote/", () => {
+    check("under the loader, the loader's own ?canister= is not read", configFromURL().pollCanisterId, config.pollCanisterId);
+  });
+  // Nothing but canister and host moves: with neither given, a local page's
+  // config is exactly the file's, whatever else the link carries.
+  check("the trust anchors are never overridable",
+    configFromURL("http://localhost/?K=0&verifiers=0xabc&trusted=x&rpc=x"), config);
+  check("no URL: the file's config", configFromURL(null), config);
 });
 
 // --- the module graph -----------------------------------------------------
