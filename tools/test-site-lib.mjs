@@ -37,6 +37,7 @@ import * as candid from "../site/lib/candid.js";
 import { Agent, Ed25519Identity, requestId } from "../site/lib/agent.js";
 import { certifiedData, parseCertificate, hashTree } from "../site/lib/certificate.js";
 import * as eh from "../site/lib/election-hash.js";
+import { hostFor, pageURL } from "../site/config.js";
 import {
   computeVerdict,
   GREEN,
@@ -433,6 +434,30 @@ group("verdict rules", () => {
 // the file itself. What CAN be checked without a browser is that it parses and
 // that every symbol it imports actually exists -- which is where a rename or a
 // typo would otherwise sit undetected until a voter loaded the page.
+
+group("page host (config.js)", () => {
+  check("served from an icp0.io gateway: mainnet", hostFor("https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/ic-vote/"), "https://icp-api.io");
+  check("a local gateway: the replica", hostFor("http://umobs.raw.localhost:4943/site/ic-vote/"), "http://127.0.0.1:4943");
+  check("a lookalike host is not icp0.io's", hostFor("https://icp0.io.evil.example/"), "http://127.0.0.1:4943");
+  check("no URL: the replica", hostFor(null), "http://127.0.0.1:4943");
+  check("not a URL: the replica", hostFor(""), "http://127.0.0.1:4943");
+  // Under ic-git's loader the page runs on the loader's origin with <base> at
+  // the served URL: the base, not location, says where it came from.
+  const saved = { document: Object.getOwnPropertyDescriptor(globalThis, "document"), location: Object.getOwnPropertyDescriptor(globalThis, "location") };
+  const set = (k, v) => Object.defineProperty(globalThis, k, { value: v, configurable: true, writable: true });
+  try {
+    set("location", { href: "file:///Users/someone/loader.html?repo=ic-vote" });
+    set("document", { baseURI: "https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/ic-vote/" });
+    check("pageURL prefers document.baseURI to location", pageURL(), "https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/ic-vote/");
+    check("...so the loaded page talks to mainnet", hostFor(pageURL()), "https://icp-api.io");
+    set("document", {});
+    check("without a baseURI, location", pageURL(), "file:///Users/someone/loader.html?repo=ic-vote");
+  } finally {
+    for (const [k, d] of Object.entries(saved)) {
+      if (d) Object.defineProperty(globalThis, k, d); else delete globalThis[k];
+    }
+  }
+});
 
 await group("site module graph", async () => {
   const siteDir = new URL("../site/", import.meta.url);

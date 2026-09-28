@@ -11,12 +11,9 @@
 // Reviewers: the addresses below are as load-bearing as any line of code here.
 
 export const config = {
-  /// Where to talk to the IC. On a deployed frontend this is the origin the
-  /// page came from; locally it is the replica.
-  host:
-    typeof location !== "undefined" && location.hostname.endsWith("icp0.io")
-      ? "https://icp-api.io"
-      : "http://127.0.0.1:4943",
+  /// Where to talk to the IC: mainnet when the page came from an icp0.io
+  /// gateway, the local replica otherwise. See pageURL for "came from".
+  host: hostFor(pageURL()),
 
   /// The poll canister holding elections. Set at deploy time.
   pollCanisterId: null,
@@ -45,6 +42,25 @@ export const config = {
     K: 2,
   },
 };
+
+/// The URL this page was served from. document.baseURI rather than location:
+/// the two are the same when the page is served directly, but a verifier
+/// that runs the checked bytes on its own origin (ic-git's loader) sets
+/// <base> to the served URL, and location is then the verifier's page.
+export function pageURL() {
+  if (typeof document !== "undefined" && typeof document.baseURI === "string") return document.baseURI;
+  return typeof location !== "undefined" ? location.href : null;
+}
+
+/// The IC API for a page served from `url` (null, or not a URL: local).
+export function hostFor(url) {
+  try {
+    if (new URL(url).hostname.endsWith("icp0.io")) return "https://icp-api.io";
+  } catch {
+    // not a URL: fall through to the replica
+  }
+  return "http://127.0.0.1:4943";
+}
 
 /// Overridable from the page URL for local development ONLY.
 ///
