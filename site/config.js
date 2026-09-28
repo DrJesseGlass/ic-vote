@@ -76,9 +76,10 @@ export function isLocal(url) {
 }
 
 /// Overridable from the page URL for local development ONLY, and so honored
-/// only on a page served locally (isLocal of pageURL, so a page a verifier
-/// runs under <base> is judged by where it was served, not by the
-/// verifier's origin).
+/// only on a page served locally. Both the check and the parameters come from
+/// the one URL, pageURL by default: a page a verifier runs under <base> is
+/// judged by, and configured from, where it was served, not the verifier's
+/// own page.
 ///
 /// Note what is and is not overridable: the canister and host can be pointed
 /// at a local replica, but the trusted verifier set and K cannot, because a
@@ -87,9 +88,9 @@ export function isLocal(url) {
 /// The same holds for the canister and host on a deployed page: a link with
 /// ?canister=<theirs> would hand a voter's page to someone else's poll
 /// canister, so off this machine the parameters are ignored.
-export function configFromLocation(loc, served = pageURL()) {
-  if (!isLocal(served)) return { ...config };
-  const params = new URLSearchParams(loc?.search ?? "");
+export function configFromURL(url = pageURL()) {
+  if (!isLocal(url)) return { ...config };
+  const params = new URL(url).searchParams;
   return {
     ...config,
     host: params.get("host") ?? config.host,

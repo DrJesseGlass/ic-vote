@@ -37,7 +37,7 @@ import * as candid from "../site/lib/candid.js";
 import { Agent, Ed25519Identity, requestId } from "../site/lib/agent.js";
 import { certifiedData, parseCertificate, hashTree } from "../site/lib/certificate.js";
 import * as eh from "../site/lib/election-hash.js";
-import { config, configFromLocation, hostFor, isLocal, pageURL } from "../site/config.js";
+import { config, configFromURL, hostFor, isLocal, pageURL } from "../site/config.js";
 import {
   computeVerdict,
   GREEN,
@@ -470,22 +470,31 @@ group("development overrides only on a local page (config.js)", () => {
   for (const u of ["https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/ic-vote/", "https://localhost.evil.example/", "https://127.0.0.1.evil.example/", "file:///Users/someone/loader.html", "", null]) {
     check(`not local: ${u}`, isLocal(u), false);
   }
-  const link = { search: "?canister=aaaaa-aa&host=https://evil.example" };
-  const deployed = configFromLocation(link, "https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/ic-vote/");
+  const q = "?canister=aaaaa-aa&host=https://evil.example";
+  const deployed = configFromURL("https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/ic-vote/" + q);
   check("a deployed page ignores ?canister=", deployed.pollCanisterId, config.pollCanisterId);
   check("a deployed page ignores ?host=", deployed.host, config.host);
-  const local = configFromLocation(link, "http://umobs.raw.localhost:4943/site/ic-vote/");
+  const local = configFromURL("http://umobs.raw.localhost:4943/site/ic-vote/" + q);
   check("a local page takes ?canister=", local.pollCanisterId, "aaaaa-aa");
   check("a local page takes ?host=", local.host, "https://evil.example");
-  // Under a verifier's <base> the served URL decides, even when the
-  // verifier itself was opened from localhost.
-  withPage("http://localhost:8080/loader.html?canister=aaaaa-aa", "https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/ic-vote/", () => {
-    check("run under the loader: judged by the served URL", configFromLocation(link).pollCanisterId, config.pollCanisterId);
+  // Under a verifier's <base> the served URL decides, and is where the
+  // parameters are read, even when the verifier itself was opened from
+  // localhost.
+  withPage("http://localhost:8080/loader.html" + q, "https://umobs-yiaaa-aaaab-agyrq-cai.raw.icp0.io/site/ic-vote/", () => {
+    check("under the loader, a deployed page ignores the loader's ?canister=", configFromURL().pollCanisterId, config.pollCanisterId);
+  });
+  withPage("http://localhost:8080/loader.html", "http://umobs.raw.localhost:4943/site/ic-vote/" + q, () => {
+    check("under the loader, a local page takes the served URL's ?canister=", configFromURL().pollCanisterId, "aaaaa-aa");
+    check("...and its ?host=", configFromURL().host, "https://evil.example");
+  });
+  withPage("http://localhost:8080/loader.html" + q, "http://umobs.raw.localhost:4943/site/ic-vote/", () => {
+    check("under the loader, the loader's own ?canister= is not read", configFromURL().pollCanisterId, config.pollCanisterId);
   });
   // Nothing but canister and host moves: with neither given, a local page's
   // config is exactly the file's, whatever else the link carries.
   check("the trust anchors are never overridable",
-    configFromLocation({ search: "?K=0&verifiers=0xabc&trusted=x&rpc=x" }, "http://localhost/"), config);
+    configFromURL("http://localhost/?K=0&verifiers=0xabc&trusted=x&rpc=x"), config);
+  check("no URL: the file's config", configFromURL(null), config);
 });
 
 // --- the module graph -----------------------------------------------------
