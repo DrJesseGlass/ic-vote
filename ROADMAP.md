@@ -323,10 +323,12 @@ ic-vote cannot ship V0 until ic-git provides:
    The live Sepolia registry is the `set`/`get` one.
 3. **`registry_publish_site` exercised on mainnet** -- done. ic-git's
    `evm_registry_publish_site` has written `ic-vote#site` from the mainnet
-   canister's EOA to the Sepolia registry, most recently 2026-09-29 (tx
-   0xf50639fce229c51505baeef7800b2da2c3434a451c8c9b5f7e6b1bcdf2b3dfa0,
-   ic-git commit 7cea175), verified by ic-git's tools/verify.mjs and its
-   browser loader; the loader's own record went through the same path.
+   canister's EOA to the Sepolia registry, most recently 2026-09-30 (tx
+   0x8375da181dd742cc4c223bfb80a626e89e82e8bafd8ba2f59f3a458860decf10,
+   ic-git commit 4c500e4, the first with the stylesheet inlined), verified
+   by ic-git's tools/verify.mjs, its browser loader, and its extension,
+   which opens the page without the stop page and shows YELLOW; the
+   loader's own record went through the same path.
 4. **Multi-chain EVM config** -- currently single-chain (Sepolia); needed to
    put the election's provenance on the chain the organization actually uses.
 
