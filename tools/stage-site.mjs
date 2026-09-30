@@ -32,8 +32,13 @@
 //    entrypoint whose subresources carry no `integrity` (site.rs,
 //    unverifiable_subresource): a hash on the page alone attests one blob,
 //    and a gateway could swap an unpinned stylesheet or script while every
-//    other check passed. So each tag gets a sha384 of the file it names,
-//    and with (2) that covers every byte the page runs.
+//    other check passed. So the script tag gets a sha384 of the file it
+//    names, and with (2) that covers every byte the page runs. The
+//    stylesheet is not pinned as a file but inlined: the <link> becomes a
+//    <style> holding the contents of style.css, and style.css leaves the
+//    served tree. The page's own hash then covers the styles, and a
+//    verifier that pins inline style text by its hash (the ic-git
+//    extension does, as for the console's) can pin this one.
 //
 // After writing, the page is scanned again from the bytes on disk with the
 // same rule the canister applies, so a stage that would be refused at serve
@@ -235,13 +240,17 @@ const walk = (dir, rel) => {
 walk(args.out, "");
 if (stray.length) fail(`scripts in the bundle that ${ENTRY} does not import, so nothing pins them: ${stray.join(", ")}`);
 
-// --- 3. index.html: pin every subresource --------------------------------------
+// --- 3. index.html: inline the stylesheet, pin every other subresource ----------
 
 const sri = (file) => "sha384-" + createHash("sha384").update(readFileSync(file)).digest("base64");
 const indexPath = join(args.out, "index.html");
 let html = readFileSync(indexPath, "utf8");
+if (/<style\b/i.test(html)) {
+  fail("index.html already has a <style>; the source links ./style.css and staging inlines it");
+}
 const tag = /<(link|script)\b([^>]*?)\s(href|src)="([^"]*)"([^>]*)>/g;
 let pinned = 0;
+const inlined = [];
 html = html.replace(tag, (whole, name, pre, attr, ref, post) => {
   if (/\bintegrity=/.test(pre + post)) {
     fail(`index.html already pins ${ref}; the source must not carry integrity attributes, staging adds them`);
@@ -251,14 +260,43 @@ html = html.replace(tag, (whole, name, pre, attr, ref, post) => {
   }
   const file = join(args.out, ref.slice(2));
   if (!existsSync(file)) fail(`index.html references ${ref}, which is not in the bundle`);
+  if (name === "link" && /\srel="stylesheet"/.test(pre + post)) {
+    // A <style> here carries none of the link's other attributes, so one
+    // that changes when the sheet applies (media, disabled, title) would be
+    // dropped silently.
+    const extra = (pre + post).replace(/\srel="stylesheet"/, "").replace(/\/\s*$/, "").trim();
+    if (extra) fail(`the stylesheet link carries \`${extra}\`, which inlining would drop`);
+    // A byte order mark is not part of a file's text, but inside a <style>
+    // it is: it would become part of the first selector and void that rule.
+    const css = readFileSync(file, "utf8").replace(/^\uFEFF/, "");
+    // The HTML parser ends a <style> at the first `</style`, whatever the
+    // CSS around it means: the rest of the file would become markup.
+    if (/<\/style/i.test(css)) fail(`${ref} contains \`</style\`, which would end the inline <style> early`);
+    // Inline text is covered by the page's hash; what it fetches is not.
+    // image-set() takes a bare string as a URL, with no url() around it.
+    // CSS escapes can spell any of these names another way (`u\72l(` is
+    // url(), and every escape starts with a backslash), so a stylesheet
+    // with a backslash is refused rather than decoded: the check below
+    // reads the names as written.
+    if (css.includes("\\")) fail(`${ref} contains a backslash; a CSS escape could hide a fetch from the check for @import, url() and image-set()`);
+    if (/@import\b|\burl\(|\bimage-set\(/i.test(css)) fail(`${ref} uses @import, url() or image-set(), a fetch that nothing would pin`);
+    inlined.push(file);
+    return `<style>\n${css}${css.endsWith("\n") ? "" : "\n"}</style>`;
+  }
   pinned++;
   return `<${name}${pre} ${attr}="${ref}" integrity="${sri(file)}"${post}>`;
 });
+if (inlined.length !== 1) fail(`index.html must link exactly one stylesheet to inline, found ${inlined.length}`);
 writeFileSync(indexPath, html);
+// Inlined, so no longer served as a file: a copy left in the tree would be
+// one nothing loads and nothing pins.
+for (const file of inlined) rmSync(file);
 
 // --- 4. Re-scan from disk, the way the canister will ------------------------------
 
-const served = readFileSync(indexPath, "utf8");
+// The canister skips the body of a <style>: it is text, not markup, so a
+// `<link` in a CSS comment is not a tag. Skip it here too.
+const served = readFileSync(indexPath, "utf8").replace(/(<style\b[^>]*>)[\s\S]*?(<\/style)/gi, "$1$2");
 const problems = [];
 for (const m of served.matchAll(/<(link|script)\b([^>]*)>/g)) {
   const attrs = m[2];
@@ -277,4 +315,4 @@ if (/&/.test(served.match(/<(link|script)\b[^>]*>/g)?.join("") ?? "")) {
 }
 if (problems.length) fail("the staged page would be refused by ic-git:\n  " + problems.join("\n  "));
 
-console.log(`staged ${args.out}: pollCanisterId=${args.poll}${args.git ? ` siteCanisterId=${args.git}` : ""}, ${order.length} modules linked into ${ENTRY}, ${pinned} subresources pinned`);
+console.log(`staged ${args.out}: pollCanisterId=${args.poll}${args.git ? ` siteCanisterId=${args.git}` : ""}, ${order.length} modules linked into ${ENTRY}, stylesheet inlined, ${pinned} subresource${pinned === 1 ? "" : "s"} pinned`);

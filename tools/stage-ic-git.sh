@@ -83,8 +83,9 @@ below.
   \`rust-toolchain.toml\` pins (rustup selects it in this directory). The
   compiler version is embedded in the module, so a different compiler gives
   a different hash from the same source and lockfile.
-- \`site/\`: the ballot page: \`index.html\`, \`style.css\` and one \`app.js\`,
-  which is the source tree's \`app.js\`, \`config.js\` and \`lib/*.js\` linked
+- \`site/\`: the ballot page: \`index.html\`, with the source tree's
+  \`style.css\` inlined as its one \`<style>\`, and one \`app.js\`, which is
+  the source tree's \`app.js\`, \`config.js\` and \`lib/*.js\` linked
   into a single file, so that the \`integrity\` hash \`index.html\` carries for
   it covers every module the page runs (a script tag's hash does not reach
   the modules that script imports). The linked \`config.js\` names the poll

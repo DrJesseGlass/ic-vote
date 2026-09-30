@@ -547,7 +547,8 @@ await group("staged site (tools/stage-site.mjs)", async () => {
   // hash index.html carries for a script does not reach the modules that
   // script imports. Stage into a scratch directory and check what came out:
   // one script, pinned by the hash of its bytes, that evaluates, and in
-  // which every source module's exports survived the link unchanged.
+  // which every source module's exports survived the link unchanged; and
+  // the stylesheet inlined into the page instead of served beside it.
   const siteDir = new URL("../site/", import.meta.url);
   const sources = readdirSync(siteDir, { recursive: true }).map(String).filter((f) => f.endsWith(".js")).sort();
   const out = mkdtempSync(join(tmpdir(), "ic-vote-stage-"));
@@ -569,8 +570,15 @@ await group("staged site (tools/stage-site.mjs)", async () => {
 
     const html = readFileSync(join(out, "index.html"), "utf8");
     const tags = [...html.matchAll(/<(?:script|link)\b[^>]*\s(?:src|href)="[^"]*"[^>]*>/g)].map((m) => m[0]);
-    check("index.html loads two files and pins both",
-      tags.map((t) => /\sintegrity="sha384-[A-Za-z0-9+/]+={0,2}"/.test(t)), [true, true]);
+    check("index.html loads one file and pins it",
+      tags.map((t) => /\sintegrity="sha384-[A-Za-z0-9+/]+={0,2}"/.test(t)), [true]);
+    // The stylesheet is inlined rather than pinned as a file, so that a
+    // verifier can pin it by the hash of the inline text.
+    const styles = [...html.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style\s*>/gi)];
+    check("index.html carries exactly one inline <style>", [html.match(/<style\b/gi)?.length, styles.length], [1, 1]);
+    const css = readFileSync(new URL("style.css", siteDir), "utf8");
+    check("the inline <style> holds style.css", styles[0]?.[1], `\n${css}`);
+    check("style.css is not in the staged tree", staged.includes("style.css"), false);
     const linked = readFileSync(join(out, "app.js"));
     check("the pin on app.js is the sha384 of the linked file",
       /src="\.\/app\.js" integrity="sha384-([^"]+)"/.exec(html)?.[1],
