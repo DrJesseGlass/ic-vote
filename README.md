@@ -46,8 +46,9 @@ stages `dist/` with `tools/stage-ic-git.sh`, which holds three things:
 `app.wasm` for the deploy queue; `site/`, rendered for this deployment;
 and the sources and pinned toolchain that reproduce the wasm. Rendering
 writes the poll canister's id into `config.js`, links the page's modules
-into one `app.js`, and puts an `integrity` hash on each file `index.html`
-loads, so the page's hash covers every byte it runs. The script then
+into one `app.js`, inlines `style.css` into `index.html` as a `<style>`,
+and puts an `integrity` hash on the one file `index.html` still loads, so
+the page's hash covers every byte it runs. The script then
 commits `dist/` on top of the repo's tip, pushes it signed, and watches
 `/api/NAME/deploys` until the install reports.
 

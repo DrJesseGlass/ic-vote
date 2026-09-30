@@ -261,12 +261,20 @@ html = html.replace(tag, (whole, name, pre, attr, ref, post) => {
   const file = join(args.out, ref.slice(2));
   if (!existsSync(file)) fail(`index.html references ${ref}, which is not in the bundle`);
   if (name === "link" && /\srel="stylesheet"/.test(pre + post)) {
-    const css = readFileSync(file, "utf8");
+    // A <style> here carries none of the link's other attributes, so one
+    // that changes when the sheet applies (media, disabled, title) would be
+    // dropped silently.
+    const extra = (pre + post).replace(/\srel="stylesheet"/, "").replace(/\/\s*$/, "").trim();
+    if (extra) fail(`the stylesheet link carries \`${extra}\`, which inlining would drop`);
+    // A byte order mark is not part of a file's text, but inside a <style>
+    // it is: it would become part of the first selector and void that rule.
+    const css = readFileSync(file, "utf8").replace(/^\uFEFF/, "");
     // The HTML parser ends a <style> at the first `</style`, whatever the
     // CSS around it means: the rest of the file would become markup.
     if (/<\/style/i.test(css)) fail(`${ref} contains \`</style\`, which would end the inline <style> early`);
     // Inline text is covered by the page's hash; what it fetches is not.
-    if (/@import\b|\burl\(/i.test(css)) fail(`${ref} uses @import or url(), a fetch that nothing would pin`);
+    // image-set() takes a bare string as a URL, with no url() around it.
+    if (/@import\b|\burl\(|\bimage-set\(/i.test(css)) fail(`${ref} uses @import, url() or image-set(), a fetch that nothing would pin`);
     inlined.push(file);
     return `<style>\n${css}${css.endsWith("\n") ? "" : "\n"}</style>`;
   }
@@ -281,7 +289,9 @@ for (const file of inlined) rmSync(file);
 
 // --- 4. Re-scan from disk, the way the canister will ------------------------------
 
-const served = readFileSync(indexPath, "utf8");
+// The canister skips the body of a <style>: it is text, not markup, so a
+// `<link` in a CSS comment is not a tag. Skip it here too.
+const served = readFileSync(indexPath, "utf8").replace(/(<style\b[^>]*>)[\s\S]*?(<\/style)/gi, "$1$2");
 const problems = [];
 for (const m of served.matchAll(/<(link|script)\b([^>]*)>/g)) {
   const attrs = m[2];
