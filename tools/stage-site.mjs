@@ -274,6 +274,11 @@ html = html.replace(tag, (whole, name, pre, attr, ref, post) => {
     if (/<\/style/i.test(css)) fail(`${ref} contains \`</style\`, which would end the inline <style> early`);
     // Inline text is covered by the page's hash; what it fetches is not.
     // image-set() takes a bare string as a URL, with no url() around it.
+    // CSS escapes can spell any of these names another way (`u\72l(` is
+    // url(), and every escape starts with a backslash), so a stylesheet
+    // with a backslash is refused rather than decoded: the check below
+    // reads the names as written.
+    if (css.includes("\\")) fail(`${ref} contains a backslash; a CSS escape could hide a fetch from the check for @import, url() and image-set()`);
     if (/@import\b|\burl\(|\bimage-set\(/i.test(css)) fail(`${ref} uses @import, url() or image-set(), a fetch that nothing would pin`);
     inlined.push(file);
     return `<style>\n${css}${css.endsWith("\n") ? "" : "\n"}</style>`;
