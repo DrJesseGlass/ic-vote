@@ -4,33 +4,53 @@ Companion to ROADMAP.md. That document says what V0 *is*; this one says how
 much of it currently exists, and is written to the same rule as THREAT_MODEL.md
 -- a mechanism may only ever be described as doing the specific thing it does.
 
-Last updated with the first code commit.
+Last updated 2026-10-22, when the page was reconciled with what ic-git had
+built since the first code commit: the certified reader and governance.
 
 ## The dependency question, answered honestly
 
-ROADMAP.md says nothing in ic-vote should start before ic-git dependency 1
-(the certified module-hash reader) has a prototype, "because a failure there
-changes the whole design."
+ROADMAP.md said nothing in ic-vote should start before ic-git dependency 1
+(the certified module-hash reader) had a prototype, "because a failure there
+changes the whole design." The first build made that dependency an explicit,
+fail-closed seam: `verifySignature()` returned `UNAVAILABLE`, the verdict
+treated it as "could not check", and the page could not show GREEN.
 
-That is still the right instinct, and this build does not pretend the
-dependency is satisfied. What it does instead is make the dependency an
-**explicit, named, fail-closed seam** rather than a reason to write nothing:
+The dependency landed (ic-git v0.3.4, docs/CERTIFIED.md). This is how the
+seam was closed, stated so the bet can be judged:
 
-- `site/lib/certificate.js` reconstructs the IC hash tree, walks it, and reads
-  `certified_data` and `module_hash` out of a real certificate. All of that
-  needs only sha256 and is built and tested against live replica output.
-- `verifySignature()` in that file returns `UNAVAILABLE`. It does not throw and
-  it does not return true.
-- `site/lib/verifier.js` treats `UNAVAILABLE` as capping the verdict below
-  GREEN, structurally: the only function that moves the verdict is monotone
-  downward, and "could not check" is a distinct state from "checked and fine".
-- Consequently **this app cannot currently display GREEN**, and there is a test
-  asserting exactly that
-  (`unverified certificate cannot reach GREEN`).
+- The reader is **ic-git's, vendored whole**: `site/lib/ic-git-core.js` is
+  ic-git's `core/verifier.js` and its BLS verifier, byte for byte, with the
+  ic-git commit and each block's sha256 in its header
+  (`tools/sync-ic-git-core.mjs`; `--verify` checks the copy against its
+  header without a checkout). A copy and not an import because the page is
+  one pinned file; the linker in `tools/stage-site.mjs` takes it in like any
+  other module.
+- `provenance.canisterState` hands a canister id to that core and gets back
+  its module hash AND controllers, read from a state certificate only after
+  the core has checked that the signing key is delegated by the pinned NNS
+  root key, that the BLS12-381 signature verifies, that the certificate is
+  dated and fresh, and that the paths are present rather than pruned. A
+  certificate that fails any of that comes back `certified: false` with
+  nothing read.
+- `verifySignature()` was deleted, not filled in. The core does the whole
+  read, request included, so there was no longer a certificate for this
+  repo's code to verify on that path.
+- The calling code DID change, against the first build's prediction, and for
+  a reason: the controllers. ic-git did not build the third-party attestation
+  the first design waited for (dependency 2); it built governance, and
+  judging governance needs who controls a canister, which the same
+  certificate shows. `computeVerdict` now takes certified states, not hashes,
+  and section 4 of it is new ("Trustees", below).
+- The invariant held: "could not check" is still a distinct state from
+  "checked and fine", a refused certificate caps the verdict below GREEN, and
+  the test for it is now `a refused serving-canister certificate cannot reach
+  GREEN`. The live test verifies a certificate against a local replica's root
+  key and asserts the pinned mainnet key refuses the same certificate.
 
-If dependency 1 lands and works, `verifySignature` becomes real and no calling
-code changes. If it lands and the design turns out to be wrong, the blast
-radius is one file. That is the bet, stated so it can be judged.
+The page can show GREEN. Against mainnet on 2026-10-22, with a pin set from
+the live values, every check passed: both canisters certified, both on their
+pins, the poll canister governed by ic-git and running the `ic-vote#app`
+build, ic-git under its governor and running the `ic-git#canister` build.
 
 ## Built and exercised
 
@@ -46,7 +66,9 @@ radius is one file. That is the bet, stated so it can be judged.
 | Independent CLI verifier (2nd implementation) | `tools/verify-election.mjs` | 22 tamper cases in `tools/tamper-test.sh` |
 | Hand-written IC agent (CBOR, candid, Ed25519) | `site/lib/` | live-replica tests |
 | Browser-side board recomputation (3rd implementation) | `site/lib/election-hash.js` | agrees with canister + CLI on live data |
-| GREEN/YELLOW/RED verdict rules | `site/lib/verifier.js` | 17 rule tests |
+| GREEN/YELLOW/RED verdict rules | `site/lib/verifier.js` | rule tests over every section |
+| Certified module hash and controllers of the serving canister, the poll canister and the governor (ic-git's core, vendored) | `site/lib/ic-git-core.js`, `provenance.js::canisterState` | live test: verified against the replica's root key, refused under the pinned mainnet key |
+| Governance judgment: poll canister governed by ic-git and running its `<repo>#app` record; ic-git under the pinned governor and running its `ic-git#canister` record | `site/lib/verifier.js`, section 4 | rule tests; GREEN against mainnet on 2026-10-22 |
 | Ballot gate driven by the verdict | `site/app.js` | RED blocks; YELLOW requires acknowledgement |
 
 Run it all: `tools/check.sh --live`.
@@ -73,17 +95,19 @@ Run it all: `tools/check.sh --live`.
 
 | Gap | Blocked on | Current behaviour |
 |---|---|---|
-| BLS verification of IC certificates | ic-git dep. 1 | `UNAVAILABLE`; caps verdict below GREEN |
-| Certificate freshness bound | same | `certificateTime()` parses it; not yet trustworthy, because an unsigned certificate can claim any time |
-| Trusted verifier set | ic-git dep. 2 (`attest()` + K-of-N tooling) | **empty** in `config.js`; attestation check reports that nobody has attested, verdict RED |
-| Real registry record for this repo | ic-git dep. 3 (`registry_publish_site` on mainnet) | `registrySite()` is implemented and reads a live chain; there is simply no record yet |
+| BLS verification of the election's own `certified_head` certificate (check G) | a certificate verifier for arbitrary paths, exported from ic-git's core (its reader is built around the two canister paths it needs) | the page and `tools/verify-election.mjs` take that certificate apart structurally and say so. The module-hash and controller reads do NOT have this gap: they go through the core |
+| Freshness bound on that certificate | same | `certificateTime()` shows it; nothing relies on it. The core applies a real bound to the certificates it verifies |
+| Trusted verifier set | gone: ic-git dep. 2 was superseded by governance | the governor pin in `config.js` took its place (ROADMAP.md, "Dependencies on ic-git") |
+| Real registry records for this repo | done | `ic-vote#site` (2026-09-30) and `ic-vote#app` (2026-10-08) are on Sepolia; `registryRecord()` reads them |
 | Multi-chain registry | ic-git dep. 4 | `config.rpc` is a chain-id map; only the chain in the election's pin is read |
 | Voter enrolment | T4, a governance question | demo Ed25519 key in `localStorage`, labelled as such in the UI |
 
-The empty verifier set deserves a note. It would have been easy to put two
-plausible addresses in `config.js` and get a page that renders confidently.
-That page would verify nothing, which is the failure this project exists to
-name. An empty set produces RED, and RED is correct.
+The governor pin deserves a note. It would have been easy to accept "any
+canister with no controllers" as a governor and get a page that renders
+confidently under a governor an attacker made. The pin names the module hash
+as well as the id, as ic-git's own core does, and the test suite asserts the
+two pins agree, so a re-sync of the core that brings a successor governor
+cannot leave this page trusting the old one by accident.
 
 ## What a reviewer should look at first
 
@@ -110,22 +134,27 @@ conflated them:
   operator.
 - the **poll canister** holds the roll, the log and the tally. Its controller
   can change what the ballots *mean*. This is the repo's **app canister** on
-  ic-git (`tools/push-ic-git.sh`, README "Why this is a separate repo"), and
-  it has **two** controllers: the wallet that owns the repo, and ic-git,
-  which installs `app.wasm` from each push through its deploy queue.
+  ic-git (`tools/push-ic-git.sh`, README "Why this is a separate repo"). It
+  had **two** controllers, the wallet that owns the repo and ic-git, until it
+  was governed on 2026-10-08: now ic-git is its only controller, and installs
+  `app.wasm` from each approved push through its deploy queue.
 
 **A second correction.** This section used to say the two canisters had
 "different controllers", which was true while the poll canister was
-deployed with dfx under a key of its own. It is not true now: ic-git is a
-controller of both, and the repo owner is a second party on the poll
-canister. Two consequences follow, and neither is hidden by the pin:
+deployed with dfx under a key of its own. It is not true now: ic-git is the
+controller of the poll canister, and ic-git is in turn controlled by its
+governor. Two consequences follow, and neither is hidden by the pin:
 
-- Every push to the repo can change the code that counts. ic-git's own
-  gate covers this: `set_required_votes(repo, k)` with the trustees as the
-  repo's voters holds every push until `k` of them have approved that
+- Every approved push to the repo can change the code that counts. ic-git's
+  own gate covers this: `set_required_votes(repo, k)` with the trustees as
+  the repo's voters holds every push until `k` of them have approved that
   commit, before the deploy queue runs it. That is a K-of-N on the *commit*,
-  authenticated by the IC, live today. It is not the K-of-N on the module
-  hash that the trusted verifier set is for (below), which is still unbuilt.
+  authenticated by the IC. Since the poll canister is governed it is also the
+  only way code gets into it: the repo owner was removed as a controller, the
+  policy is locked (`k` cannot return to 0, and changing the approvers is
+  itself a vote), and ic-git records each install on chain as `ic-vote#app`.
+  The page checks all of that from the certificate and the record
+  (`verifier.js`, section 4).
 - `Pin.module_sha256` is ic-git's module hash, so an ic-git upgrade during
   an open window is a spoiling event by construction: a certified read that
   differs is RED. That was already so; what is new is that the party who
@@ -149,16 +178,18 @@ document that hides its own corrections is not worth reading.
 What the pin does and does not establish, stated exactly:
 
 - It makes a mid-window **change** visible. That is THREAT_MODEL.md 2.5.
-- It does **not** establish the starting point. The pinned hash is a value the
-  administrator declares; nothing yet proves it was the right one. That is what
-  K-of-N attestation is for, and the trusted verifier set is empty.
+- It does **not** by itself establish the starting point. The pinned hash is a
+  value the administrator declares. What proves it was the right one is
+  section 4 of the verdict: the poll canister's hash must be the build ic-git
+  recorded for an approved commit, and the serving canister's must be the
+  build ic-git recorded under its governor.
 
 Three consequences worth stating plainly:
 
-1. Containment is only as good as the module-hash read, and that read is
-   currently capped at UNKNOWN because the certificate is unauthenticated (see
-   above). Until ic-git dependency 1 lands, an upgrade is *suspected*, not
-   detected.
+1. Containment is only as good as the module-hash read, and that read is now
+   certified: ic-git's core verifies the certificate before the hash is read,
+   so an upgrade is detected, not suspected. A read the core refuses is
+   UNKNOWN, which is the next point.
 2. **A read that fails is treated more softly than a read that mismatches.** A
    mismatch is BAD, so RED, so the ballot is blocked. A read that cannot
    complete at all is UNKNOWN, so YELLOW, which the UI lets a voter click past
@@ -174,9 +205,9 @@ Three consequences worth stating plainly:
    an unexpected one, rather than printing it and hoping someone reads the
    scrollback. That harness deploys with dfx on a local replica, which is
    still how the rules are exercised; on mainnet the deployer is ic-git's
-   deploy queue and the controller set of the poll canister is the repo
-   owner plus ic-git, as stated above, and the administrator should be a
-   different key from the repo owner for the same reason.
+   deploy queue, the poll canister's only controller is ic-git (governed
+   since 2026-10-08), and the administrator should be a different key from
+   the repo owner for the same reason.
 
 Every script under `tools/` passes `--identity` explicitly rather than
 inheriting the ambient `dfx` selection, including `verify-election.mjs`'s
@@ -247,14 +278,16 @@ What it does **not** establish:
 - Who the trustees are. The administrator names them, in Draft, exactly as
   they upload the roll. This is the T4 boundary again, published so members
   can audit it, not removed.
-- Anything about the code. This is not the K-of-N on
-  `Pin.poll_module_sha256`, which remains **unbuilt** (ic-git dependency 2).
-  That one needs the crate's *signed* flavour -- independent verifiers
-  signing a module hash so a browser that never talks to this canister can
-  count them against the keyset in `config.js` -- and the JavaScript tally
-  that both projects will share is on the crate's roadmap, not in this repo.
-  `config.trusted.verifiers` is still empty, and the page still cannot show
-  GREEN.
+- Anything about the code. The K-of-N on the code is a different vote: the
+  repo's approvers on each commit, enforced by ic-git before its deploy queue
+  installs `app.wasm`, with the poll canister governed so that nothing else
+  can install into it, and each install recorded on chain as `ic-vote#app`.
+  The page checks that (section 4 of `verifier.js`): the controllers and
+  module hash from a certificate ic-git's core verified, and the hash against
+  the record. What it does not give is a count of independent reproductions
+  by parties outside the approvers; the crate's *signed* flavour, which that
+  would need, is unused here, and the first design's trusted verifier set is
+  gone from `config.js`.
 
 **One correction recorded here, in the same spirit as the one above.** The
 manifest hash used to include `opened_at`, the time of the `open_election`
@@ -279,3 +312,11 @@ than publish boards its own verifiers would reject.
   the page reports RED with "nothing to verify", which is the right thing for
   it to say.
 - No CI. `tools/check.sh` is the thing CI should run.
+- The `Pin` doc comment in `canisters/poll/src/types.rs` still describes the
+  K-of-N attestation of the first design. Left as it is on purpose: a comment
+  change moves the wasm hash (panic-location strings carry line numbers), and
+  a new module is a vote, a deploy and a new `ic-vote#app` record. It goes
+  with the next functional change to the canister.
+- The vendored core is 200 KB, most of it the BLS verifier, and the staged
+  `app.js` is 320 KB. That is the price of verifying a certificate in the
+  page rather than taking a gateway's word; ic-git's loader pays the same.

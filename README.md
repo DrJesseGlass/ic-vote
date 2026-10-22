@@ -6,11 +6,13 @@ provenance stack.
 
 **Status: V0 building.** The poll canister, the independent verifier, and the
 voter-facing bundle with its provenance gate exist and are tested end to end
-against a local replica. The page **cannot currently show GREEN**, on purpose:
-the certificate-signature check it would need is an ic-git dependency that is
-not built, and an unverifiable input caps the verdict rather than being
-ignored. See [docs/V0_STATUS.md](docs/V0_STATUS.md) for exactly what is built,
-what is stubbed, and what each stub does instead.
+against a local replica. The page can reach GREEN: it reads each canister's
+module hash and controllers out of a state certificate that ic-git's vendored
+core verifies against the pinned NNS root key, and judges them by who may
+change the code -- the poll canister governed by ic-git, ic-git by its
+governor -- and by the builds ic-git recorded on chain. See
+[docs/V0_STATUS.md](docs/V0_STATUS.md) for exactly what is built, what is
+still structural only, and what each gap does instead.
 
     tools/check.sh --live
 

@@ -73,9 +73,10 @@ voting client is honest, or hope enough voters audit.**
 ic-git makes the client itself checkable. Not "trust the client," not
 "statistically audit the client," but:
 
-> the bytes running in your browser hash to a bundle attested at a commit
-> that K independent reviewers reproduced, served by a canister whose
-> certified module hash those same reviewers attested.
+> the bytes running in your browser hash to a bundle recorded at a commit
+> that K approvers voted through, served by a canister whose certified module
+> hash is the build those votes installed, and whose only controller is a
+> governor nobody controls.
 
 It converts the load-bearing assumption into a check. Concretely, the ic-git
 stack supplies:
@@ -83,10 +84,12 @@ stack supplies:
 - **F0/F2** -- the ballot page is served from a committed bundle by the
   canister itself, with IC response certification, and a client-side verifier
   compares served bytes against the on-chain `(commit, bundleHash)` record.
-- **Backend attestation** (`docs/ATTESTATION.md`) -- the serving canister's
-  *own* wasm is reproducible-built and attested on-chain by K independent
-  verifiers, so "the canister serving the ballot runs the reviewed code" is
-  itself checkable.
+- **Governance** (ic-git `docs/GOVERNANCE.md`) -- the serving canister's *own*
+  wasm is reproducible-built, installed only by a governor canister nobody
+  controls when ic-git's approvers vote it through, and recorded on chain; the
+  poll canister likewise is installed only by ic-git, from a commit its
+  approvers voted through. "The canister serving the ballot runs the reviewed
+  code" is read from the IC's certificates, not taken on anyone's word.
 - **No standing credentials** -- there is no deploy key for an attacker to
   steal, because the deployer is a program whose EOA exists only as threshold
   shares across a subnet.

@@ -23,6 +23,9 @@ say "every tracked file is pure ASCII"
 # why the obvious shell spelling fails open on BSD grep.
 node tools/check-ascii.mjs
 
+say "vendored ic-git core matches its header"
+node tools/sync-ic-git-core.mjs --verify
+
 say "frontend library tests (offline)"
 node tools/test-site-lib.mjs
 

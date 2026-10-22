@@ -174,9 +174,10 @@ export class RejectedError extends Error {
 }
 
 export class Agent {
-  /// `host` is the replica or gateway origin. Note that using a gateway makes
-  /// it a trusted party for transport (T5 in THREAT_MODEL.md) until the
-  /// certificate check in certificate.js is real.
+  /// `host` is the replica or gateway origin. A gateway is a trusted party
+  /// for transport (T5 in THREAT_MODEL.md): what it serves is checked by hash
+  /// and, for canister state, by certificate (provenance.js), but it sees
+  /// every request.
   constructor({ host, canisterId, identity = new AnonymousIdentity() }) {
     this.host = host.replace(/\/$/, "");
     this.canisterId = canisterId;
@@ -279,21 +280,5 @@ export class Agent {
       if (Date.now() > deadline) throw new Error(`call to ${method} did not resolve in ${timeoutMs}ms`);
       await new Promise((r) => setTimeout(r, intervalMs));
     }
-  }
-
-  /// Certified module hash of an arbitrary canister -- the read ic-git's
-  /// attestation flow is built on. The certificate comes back unverified; see
-  /// certificate.js.
-  async readModuleHash(canisterIdText) {
-    const blob = principalToBytes(canisterIdText);
-    const content = {
-      request_type: "read_state",
-      paths: [[utf8("canister"), blob, utf8("module_hash")]],
-      sender: this.identity.principal,
-      ingress_expiry: this.expiry(),
-    };
-    const envelope = await this.identity.transform(content);
-    const reply = await this.post(`/api/v2/canister/${canisterIdText}/read_state`, envelope);
-    return reply.get("certificate");
   }
 }

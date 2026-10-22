@@ -120,10 +120,13 @@ need to design around a test key. Re-verified 2026-07-26; details below.
 checkpointing. Relevant at V0 for anchoring the final tally hash.
 
 **Certified state / response certification** -- the basis of the bundle
-verification; ic-git's `docs/ATTESTATION.md` specifies the certified
-module-hash read (BLS12-381 + pinned NNS root key + freshness). **That reader
-is the highest-risk unbuilt component in the whole stack and ic-vote depends
-on it.** It is the first thing to prototype, in ic-git, not here.
+verification. ic-git's certified reader (`core/verifier.js`,
+docs/CERTIFIED.md: BLS12-381 against the pinned NNS root key through the
+subnet delegation, a five-minute freshness bound, pruned paths refused)
+shipped in ic-git v0.3.4 and is vendored here whole
+(`site/lib/ic-git-core.js`, `tools/sync-ic-git-core.mjs`). It was the
+highest-risk unbuilt component in the stack; it is built, and the ballot page
+reads every module hash and controller list through it.
 
 ## V0 -- verifiable client, public ballots
 
@@ -315,12 +318,26 @@ acceptable and truthful outcome.
 
 ## Dependencies on ic-git
 
-ic-vote cannot ship V0 until ic-git provides:
+What V0 needs from ic-git, and where each stands:
 
-1. **Certified module-hash reader** (BLS + NNS root key + freshness) --
-   `docs/ATTESTATION.md`, unbuilt, highest risk.
-2. **Registry `attest()` + K-of-N verifier tooling** -- specified, unbuilt.
-   The live Sepolia registry is the `set`/`get` one.
+1. **Certified module-hash reader** (BLS + NNS root key + freshness) -- done:
+   ic-git v0.3.4, docs/CERTIFIED.md, and consumed here since 2026-10-22.
+   `provenance.canisterState` hands a canister id to the vendored core and
+   gets back its module hash and controllers, read only after the certificate
+   chain verified; `site/lib/certificate.js` keeps only the structural tree
+   code, for the election's own `certified_head`.
+2. **Registry `attest()` + K-of-N verifier tooling** -- superseded. ic-git did
+   not build third-party attestation; it built governance
+   (docs/GOVERNANCE.md): a repo's app canister can be governed -- ic-git its
+   only controller, code changing only by the approvers' K-of-N vote on a
+   commit, each install recorded on chain as `<repo>#app` -- and ic-git
+   itself is controlled by a governor canister with no controllers, whose
+   installs are votes of ic-git's approvers, recorded as `ic-git#canister`.
+   ic-vote's poll canister has been governed since 2026-10-08. The page
+   checks both canisters that way (`site/lib/verifier.js`, section 4), and
+   the trusted verifier set is gone from `config.js`; the governor pin took
+   its place. Not given by this: a count of independent reproductions by
+   parties outside the approvers (THREAT_MODEL.md T3 is now the approvers).
 3. **`registry_publish_site` exercised on mainnet** -- done. ic-git's
    `evm_registry_publish_site` has written `ic-vote#site` from the mainnet
    canister's EOA to the Sepolia registry, most recently 2026-09-30 (tx
@@ -332,9 +349,12 @@ ic-vote cannot ship V0 until ic-git provides:
 4. **Multi-chain EVM config** -- currently single-chain (Sepolia); needed to
    put the election's provenance on the chain the organization actually uses.
 
-Items 1 and 2 are the ic-git critical path for this project. Nothing in
-ic-vote should start before item 1 has a prototype, because a failure there
-changes the whole design.
+Item 4 is what remains on ic-git's side. One gap is this repo's: the
+election's own `certified_head` certificate (check G) is still taken apart
+structurally and not authenticated, because ic-git's reader is built around
+the two canister paths it needs; a certificate verifier for arbitrary paths,
+exported from the core, is a small addition there and is tracked in
+docs/V0_STATUS.md.
 
 ## Sources
 
