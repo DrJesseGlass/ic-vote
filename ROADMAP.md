@@ -14,9 +14,9 @@ The reason for that order: client verifiability is the thing we uniquely have
 (VISION.md section 3), and every later rung's cryptography is worthless
 without it -- encrypting a ballot the client already misread proves nothing.
 
-Facts below were verified in July 2026; sources at the end. Re-check the
-load-bearing numbers before depending on them, per ic-git ROADMAP.md
-discipline.
+The IC primitives below were verified in July 2026 and the ic-git
+dependencies in October 2026; sources at the end. Re-check the load-bearing
+numbers before depending on them, per ic-git ROADMAP.md discipline.
 
 ## Verified IC primitives
 
@@ -139,6 +139,10 @@ reads every module hash and controller list through it.
 - The frontend lives in this repo, is pushed to ic-git, served by the git
   canister from the committed bundle, and attested in the ProvenanceRegistry
   as `<repo>#site`.
+- The poll canister is governed by ic-git (its only controller), changes
+  only by the approvers' vote on a commit, and each install is recorded as
+  `<repo>#app`; the page reads its module hash and controllers through a
+  verified certificate and refuses anything else.
 - The voter-facing verifier reports GREEN/YELLOW/RED per THREAT_MODEL.md
   section 4 before the ballot can be marked.
 - Final tally hash checkpointed to the registry, and to Solana once ic-git's
@@ -275,9 +279,14 @@ The subnet will derive the election key for whoever the poll canister asks it
 to. A controller who can upgrade the canister can therefore add a "derive now"
 path and read every ballot before close, and no amount of client attestation
 sees it. This is exactly REPRODUCIBLE_BUILD.md's temporal-trust residual,
-arriving with teeth: before any election with real secrecy claims, the poll
-canister's upgrade path must be under governance or blackholed, and the
-verifier should surface the controller set alongside the module hash.
+arriving with teeth. The structure for it is in place since V0 (dependency 2
+below): the poll canister is governed, ic-git is its only controller, and the
+verifier reads the controller set alongside the module hash and goes RED on
+any other controller. What V1 adds is the stake: at V0 a rogue install can
+miscount, which the public ballots expose; at V1 it can read ballots before
+close, which nothing exposes. So the residual is the approvers' K of N
+(THREAT_MODEL.md T3), and before any election with real secrecy claims that
+set and threshold must be chosen for that, not for convenience.
 
 ## V2 -- eligibility beyond the closed roll
 
