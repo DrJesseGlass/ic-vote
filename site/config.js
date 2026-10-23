@@ -27,10 +27,21 @@ export const config = {
   /// would be made against that instead of the canister that served the page.
   siteCanisterId: "umobs-yiaaa-aaaab-agyrq-cai",
 
-  /// EVM JSON-RPC endpoints by chain id. The election's pin names the chain.
-  rpc: {
-    11155111: "https://ethereum-sepolia-rpc.publicnode.com",
-    100: "https://rpc.gnosischain.com",
+  /// ic-git's ProvenanceRegistry, by chain id: the contract its records are
+  /// read from, and a JSON-RPC endpoint to read it through. The election's
+  /// pin names the chain, and must name this address on it: like the serving
+  /// canister above, the registry is an anchor the pin is checked against,
+  /// not a value taken from the pin. The pin is the administrator's word, and
+  /// a pin naming a contract of theirs would make the registry agree with
+  /// whatever the pin says, which is the one thing the registry is read to
+  /// rule out (verifier.js, section 2). Sepolia's address is the one ic-git's
+  /// core pins (its DEFAULTS; tools/test-site-lib.mjs checks they agree). A
+  /// chain is listed only once ic-git's registry is deployed on it.
+  registries: {
+    11155111: {
+      address: "0xa1362DAda583c56a395D305a8C7A458E0B62A209",
+      rpc: "https://ethereum-sepolia-rpc.publicnode.com",
+    },
   },
 
   /// ic-git's governor: the canister that alone controls the serving

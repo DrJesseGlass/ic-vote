@@ -117,8 +117,9 @@ class Checks {
 ///   appRecord         `<repo>#app`: the build ic-git installed in the poll
 ///                     canister, { commit, bundleHash, updatedAt } | null | { error }
 ///   canisterRecord    `ic-git#canister`: the build ic-git itself runs, same shape
-///   anchors           { icGit, governor: { id, module } }, from config.js:
-///                     the canister that served this bundle, and ic-git's governor
+///   anchors           { icGit, registries, governor: { id, module } }, from
+///                     config.js: the canister that served this bundle, the
+///                     registry contract per chain id, and ic-git's governor
 ///   lastSeenModuleHash  previously cached hash for the site canister, or null
 export function computeVerdict(input) {
   const c = new Checks();
@@ -179,6 +180,22 @@ export function computeVerdict(input) {
   // the pin is what the election committed to when it opened, the registry is
   // what the serving canister published. Comparing served bytes against only
   // one of them leaves the other free to drift, so all three must agree.
+  //
+  // Independent only if the registry is not the pin's to choose. The pin
+  // names a chain and a contract; the contract read is the one config.js pins
+  // for that chain, and the pin must name the same one. A pin naming a
+  // contract of the administrator's would otherwise make the records agree
+  // with the pin by construction.
+
+  const registry = anchors?.registries?.[Number(pin.registry_chain_id)];
+  const sameAddress = (a, b) => typeof a === "string" && typeof b === "string" && a.toLowerCase() === b.toLowerCase();
+  if (!registry) {
+    c.add("registry-id", "Election names the configured registry", BAD, `no registry configured for chain ${pin.registry_chain_id}`);
+  } else if (sameAddress(pin.registry_address, registry.address)) {
+    c.add("registry-id", "Election names the configured registry", OK, `${registry.address} on chain ${pin.registry_chain_id}`);
+  } else {
+    c.add("registry-id", "Election names the configured registry", BAD, `the election names ${pin.registry_address} on chain ${pin.registry_chain_id}; this page reads ${registry.address}`);
+  }
 
   if (!registryRecord || registryRecord.error) {
     c.add(

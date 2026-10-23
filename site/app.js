@@ -205,12 +205,14 @@ async function verifyProvenance(seq = state.loadSeq) {
   // The registry: the site record, the build ic-git installed in the poll
   // canister, and the build ic-git itself runs. ic-git namespaces its records;
   // the bare repo name would be the deploy-artifact record, whose hash is of
-  // contract bytecode and would never match a page.
-  const rpc = pin ? cfg.rpc[Number(pin.registry_chain_id)] : null;
+  // contract bytecode and would never match a page. The contract read is the
+  // one config.js pins for the pin's chain, never the pin's own address; the
+  // verdict checks that the two agree.
+  const registry = pin ? cfg.registries[Number(pin.registry_chain_id)] : null;
   const record = (key) =>
     attempt(async () => {
-      if (!rpc) throw new Error(`no RPC endpoint configured for chain ${pin.registry_chain_id}`);
-      return prov.registryRecord(rpc, pin.registry_address, key);
+      if (!registry) throw new Error(`no registry configured for chain ${pin.registry_chain_id}`);
+      return prov.registryRecord(registry.rpc, registry.address, key);
     });
 
   // The canisters, on the IC's word: the one serving this page, the one that
@@ -247,7 +249,7 @@ async function verifyProvenance(seq = state.loadSeq) {
     site,
     poll,
     governor,
-    anchors: { icGit: cfg.siteCanisterId, governor: cfg.governor },
+    anchors: { icGit: cfg.siteCanisterId, registries: cfg.registries, governor: cfg.governor },
     lastSeenModuleHash: localStorage.getItem(LAST_MODULE_HASH_KEY),
   });
 

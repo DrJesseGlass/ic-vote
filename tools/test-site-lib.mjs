@@ -319,7 +319,7 @@ group("verdict rules", () => {
     governor: certified(GOVERNOR.module, []),
     appRecord: { commit: "a".repeat(40), bundleHash: "7".repeat(64), updatedAt: 1n },
     canisterRecord: { commit: "d".repeat(40), bundleHash: "c".repeat(64), updatedAt: 1n },
-    anchors: { icGit: IC_GIT, governor: GOVERNOR },
+    anchors: { icGit: IC_GIT, registries: { 11155111: { address: pin.registry_address, rpc: "" } }, governor: GOVERNOR },
   };
   const detailOf = (verdict, id) => verdict.checks.find((k) => k.id === id)?.detail ?? "";
 
@@ -404,7 +404,21 @@ group("verdict rules", () => {
   check("a poll controlled by the pin's canister is not governed by ic-git",
     impostor.checks.find((k) => k.id === "poll-governed")?.state, BAD);
   check("no serving canister in config.js is a configuration error, not a pass",
-    computeVerdict({ ...healthy, anchors: { governor: GOVERNOR } }).verdict, RED);
+    computeVerdict({ ...healthy, anchors: { ...healthy.anchors, icGit: undefined } }).verdict, RED);
+
+  // Likewise the registry: the pin names a chain and a contract, and the
+  // contract must be the one the bundle pins for that chain. Records that
+  // agree with the pin prove nothing if the pin chose where they were read.
+  const otherRegistry = computeVerdict({ ...healthy, pin: { ...pin, registry_address: "0x0000000000000000000000000000000000000002" } });
+  check("a pin naming another registry contract -> RED", otherRegistry.verdict, RED);
+  check("the verdict names both contracts",
+    detailOf(otherRegistry, "registry-id").includes("0x0000000000000000000000000000000000000002") && detailOf(otherRegistry, "registry-id").includes(pin.registry_address), true);
+  check("a pin naming a chain with no configured registry -> RED",
+    computeVerdict({ ...healthy, pin: { ...pin, registry_chain_id: 100 } }).verdict, RED);
+  check("the registry address compares case-insensitively",
+    computeVerdict({ ...healthy, pin: { ...pin, registry_address: pin.registry_address.toUpperCase().replace(/^0X/, "0x") } }).verdict, GREEN);
+  check("no registries in config.js is a configuration error, not a pass",
+    computeVerdict({ ...healthy, anchors: { ...healthy.anchors, registries: {} } }).verdict, RED);
 
   const notGoverned = computeVerdict({ ...healthy, poll: certified("7".repeat(64), ["aaaaa-aa", IC_GIT]) });
   check("poll canister with a controller besides ic-git -> RED", notGoverned.verdict, RED);
@@ -472,6 +486,8 @@ group("verdict rules", () => {
   // that brings a successor governor must bring a new pin here too.
   check("config.js pins the governor ic-git's core pins",
     config.governor, Verifier.DEFAULTS.governor);
+  check("config.js pins the registry ic-git's core pins, on the same chain",
+    config.registries[Verifier.DEFAULTS.chainId]?.address, Verifier.DEFAULTS.registry);
 });
 
 // --- config.js ------------------------------------------------------------
