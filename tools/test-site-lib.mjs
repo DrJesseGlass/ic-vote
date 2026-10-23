@@ -38,13 +38,9 @@ import { Agent, Ed25519Identity, requestId } from "../site/lib/agent.js";
 import { certifiedData, parseCertificate, hashTree } from "../site/lib/certificate.js";
 import * as eh from "../site/lib/election-hash.js";
 import { config, configFromURL, hostFor, isLocal, pageURL } from "../site/config.js";
-import {
-  computeVerdict,
-  GREEN,
-  YELLOW,
-  RED,
-  OK,
-} from "../site/lib/verifier.js";
+import { computeVerdict, GREEN, YELLOW, RED, BAD } from "../site/lib/verifier.js";
+import { canisterState, localRootKey } from "../site/lib/provenance.js";
+import { Verifier } from "../site/lib/ic-git-core.js";
 
 /// The identity used for the administrative calls the live test needs
 /// (creating an election and enrolling the generated voter). Named rather than
@@ -296,28 +292,36 @@ function witness(leaves, index) {
 // --- the verdict ----------------------------------------------------------
 
 group("verdict rules", () => {
+  const IC_GIT = "umobs-yiaaa-aaaab-agyrq-cai";
+  const GOVERNOR = { id: "7kkwl-baaaa-aaaab-ag6rq-cai", module: "e".repeat(64) };
   const pin = {
     repo: "ic-vote",
     commit: "a".repeat(40),
     bundle_sha256: "b".repeat(64),
-    site_canister: "umobs-yiaaa-aaaab-agyrq-cai",
+    site_canister: IC_GIT,
     module_sha256: "c".repeat(64),
     poll_module_sha256: "7".repeat(64),
     registry_chain_id: 11155111,
     registry_address: "0x0000000000000000000000000000000000000001",
   };
+  // A certified state as ic-git's core reports one it accepted.
+  const certified = (moduleHash, controllers, extra = {}) =>
+    ({ certified: true, moduleHash, controllers, stale: false, checks: [], ...extra });
+  // One it refused: nothing read, the failing check named.
+  const refused = (id, label, detail) =>
+    ({ certified: false, moduleHash: null, controllers: null, stale: false, checks: [{ id: "C1", ok: true, label: "read", detail: "" }, { id, ok: false, label, detail }] });
   const healthy = {
     pin,
     served: { sha256: "b".repeat(64), commitHeader: "a".repeat(40) },
     registryRecord: { commit: "a".repeat(40), bundleHash: "b".repeat(64), updatedAt: 1n },
-    liveModuleHash: { hash: "c".repeat(64), signature: { status: OK } },
-    livePollModuleHash: { hash: "7".repeat(64), signature: { status: OK } },
-    attestations: [
-      { verifier: "0xA", moduleHash: "c".repeat(64), commit: "d".repeat(40), recipeHash: "e".repeat(64) },
-      { verifier: "0xB", moduleHash: "c".repeat(64), commit: "d".repeat(40), recipeHash: "e".repeat(64) },
-    ],
-    trusted: { verifiers: ["0xa", "0xb"], K: 2 },
+    site: certified("c".repeat(64), [GOVERNOR.id]),
+    poll: certified("7".repeat(64), [IC_GIT]),
+    governor: certified(GOVERNOR.module, []),
+    appRecord: { commit: "a".repeat(40), bundleHash: "7".repeat(64), updatedAt: 1n },
+    canisterRecord: { commit: "d".repeat(40), bundleHash: "c".repeat(64), updatedAt: 1n },
+    anchors: { icGit: IC_GIT, governor: GOVERNOR },
   };
+  const detailOf = (verdict, id) => verdict.checks.find((k) => k.id === id)?.detail ?? "";
 
   check("fully verified is GREEN", computeVerdict(healthy).verdict, GREEN);
   check("GREEN allows the ballot", computeVerdict(healthy).ballot, "allowed");
@@ -333,87 +337,126 @@ group("verdict rules", () => {
       registryRecord: { commit: "9".repeat(40), bundleHash: "b".repeat(64), updatedAt: 1n },
     }).verdict, RED);
 
+  // The pin alone: everything else, record included, agrees with the new
+  // module, so only the election's pin can be what fails.
   check("live module hash != pinned -> RED",
     computeVerdict({
       ...healthy,
-      liveModuleHash: { hash: "9".repeat(64), signature: { status: OK } },
-      attestations: [
-        { verifier: "0xA", moduleHash: "9".repeat(64), commit: "d".repeat(40), recipeHash: "e".repeat(64) },
-        { verifier: "0xB", moduleHash: "9".repeat(64), commit: "d".repeat(40), recipeHash: "e".repeat(64) },
-      ],
+      site: certified("9".repeat(64), [GOVERNOR.id]),
+      canisterRecord: { commit: "d".repeat(40), bundleHash: "9".repeat(64), updatedAt: 1n },
     }).verdict, RED);
-
-  check("no trusted attestation for the running wasm -> RED",
-    computeVerdict({ ...healthy, attestations: [] }).verdict, RED);
 
   // The gap the review found: the poll canister -- the one that counts the
   // ballots -- was never observed at all, so upgrading it produced no change
   // in any verdict a voter sees.
-  check("poll canister upgraded away from its pin -> RED",
-    computeVerdict({
-      ...healthy,
-      livePollModuleHash: { hash: "8".repeat(64), signature: { status: OK } },
-    }).verdict, RED);
+  const pollUpgraded = {
+    ...healthy,
+    poll: certified("8".repeat(64), [IC_GIT]),
+    appRecord: { commit: "a".repeat(40), bundleHash: "8".repeat(64), updatedAt: 1n },
+  };
+  check("poll canister upgraded away from its pin -> RED", computeVerdict(pollUpgraded).verdict, RED);
+  check("poll canister upgrade blocks the ballot", computeVerdict(pollUpgraded).ballot, "blocked");
 
-  check("poll canister upgrade blocks the ballot",
-    computeVerdict({
-      ...healthy,
-      livePollModuleHash: { hash: "8".repeat(64), signature: { status: OK } },
-    }).ballot, "blocked");
+  check("poll canister's state unreadable cannot reach GREEN",
+    computeVerdict({ ...healthy, poll: { error: "unreachable" } }).verdict, YELLOW);
 
-  check("poll canister's module hash unreadable cannot reach GREEN",
-    computeVerdict({ ...healthy, livePollModuleHash: { error: "unreachable" } }).verdict, YELLOW);
-
-  check("an unverified poll certificate cannot reach GREEN",
-    computeVerdict({
-      ...healthy,
-      livePollModuleHash: { hash: "7".repeat(64), signature: { status: "UNAVAILABLE" } },
-    }).verdict, YELLOW);
+  // The load-bearing ones: a certificate the core refused -- a signature that
+  // does not verify, a key not delegated by the root key -- must never
+  // produce GREEN, no matter how healthy everything else is, and must not be
+  // read: the verdict says which check refused it, not what the tree held.
+  const badSig = refused("C3", "the certificate is signed by that key", "signature does not verify");
+  check("a refused serving-canister certificate cannot reach GREEN",
+    computeVerdict({ ...healthy, site: badSig }).verdict, YELLOW);
+  check("the refusal names the failing check",
+    detailOf(computeVerdict({ ...healthy, site: badSig }), "site-read").includes("signature does not verify"), true);
+  check("a refused poll-canister certificate cannot reach GREEN",
+    computeVerdict({ ...healthy, poll: refused("C2", "the signing key is delegated by the NNS root key", "not signed by the NNS root key") }).verdict, YELLOW);
+  check("a stale certificate cannot reach GREEN",
+    computeVerdict({ ...healthy, site: certified("c".repeat(64), [GOVERNOR.id], { stale: true }) }).verdict, YELLOW);
+  check("a stale certificate still compares: a mismatch in it is RED",
+    computeVerdict({ ...healthy, site: certified("9".repeat(64), [GOVERNOR.id], { stale: true }) }).verdict, RED);
 
   // The two pins must not be interchangeable: a site hash accepted in the poll
-  // slot would let one attested canister vouch for the other.
+  // slot would let one canister vouch for the other.
   check("site and poll pins are not interchangeable",
     computeVerdict({
       ...healthy,
-      livePollModuleHash: { hash: "c".repeat(64), signature: { status: OK } },
+      poll: certified("c".repeat(64), [IC_GIT]),
+      appRecord: { commit: "a".repeat(40), bundleHash: "c".repeat(64), updatedAt: 1n },
     }).verdict, RED);
 
-  check("below threshold -> YELLOW",
-    computeVerdict({ ...healthy, attestations: [healthy.attestations[0]] }).verdict, YELLOW);
+  // --- governance: what vouches for the pinned values ---------------------
+
+  // Which canister is ic-git comes from the bundle, not the pin. A pin that
+  // names another canister is RED on its own; and the governance checks are
+  // made against the bundle's canister, so a poll controlled by the pin's
+  // impostor -- running ic-git's module, under the pinned governor -- is RED
+  // too, not GREEN.
+  const OTHER = "aaaaa-aa";
+  const impostor = computeVerdict({
+    ...healthy,
+    pin: { ...pin, site_canister: OTHER },
+    poll: certified("7".repeat(64), [OTHER]),
+  });
+  check("a pin naming another serving canister -> RED", impostor.verdict, RED);
+  check("the verdict names both canisters",
+    detailOf(impostor, "site-id").includes(OTHER) && detailOf(impostor, "site-id").includes(IC_GIT), true);
+  check("a poll controlled by the pin's canister is not governed by ic-git",
+    impostor.checks.find((k) => k.id === "poll-governed")?.state, BAD);
+  check("no serving canister in config.js is a configuration error, not a pass",
+    computeVerdict({ ...healthy, anchors: { governor: GOVERNOR } }).verdict, RED);
+
+  const notGoverned = computeVerdict({ ...healthy, poll: certified("7".repeat(64), ["aaaaa-aa", IC_GIT]) });
+  check("poll canister with a controller besides ic-git -> RED", notGoverned.verdict, RED);
+  check("the verdict says who can change the code that counts",
+    detailOf(notGoverned, "poll-governed").includes("without a vote"), true);
+  check("an ungoverned poll canister is not judged by a record it has no claim to",
+    notGoverned.checks.some((k) => k.id === "poll-record"), false);
+
+  check("governed poll canister with no app record -> RED",
+    computeVerdict({ ...healthy, appRecord: null }).verdict, RED);
+  check("governed poll canister running a module the record does not approve -> RED",
+    computeVerdict({ ...healthy, appRecord: { commit: "a".repeat(40), bundleHash: "6".repeat(64), updatedAt: 1n } }).verdict, RED);
+  check("app record unreadable -> YELLOW",
+    computeVerdict({ ...healthy, appRecord: { error: "RPC down" } }).verdict, YELLOW);
+
+  check("serving canister not controlled by the pinned governor -> RED",
+    computeVerdict({ ...healthy, site: certified("c".repeat(64), ["aaaaa-aa"]) }).verdict, RED);
+  check("serving canister held by the governor and someone else -> RED",
+    computeVerdict({ ...healthy, site: certified("c".repeat(64), ["aaaaa-aa", GOVERNOR.id]) }).verdict, RED);
+  check("serving canister held by nobody is not the governor -> RED",
+    computeVerdict({ ...healthy, site: certified("c".repeat(64), []) }).verdict, RED);
+
+  check("a governor that has a controller -> RED",
+    computeVerdict({ ...healthy, governor: certified(GOVERNOR.module, ["aaaaa-aa"]) }).verdict, RED);
+  check("a governor running another module -> RED",
+    computeVerdict({ ...healthy, governor: certified("f".repeat(64), []) }).verdict, RED);
+  check("governor unreadable -> YELLOW",
+    computeVerdict({ ...healthy, governor: { error: "unreachable" } }).verdict, YELLOW);
+  check("a refused governor certificate -> YELLOW",
+    computeVerdict({ ...healthy, governor: badSig }).verdict, YELLOW);
+  check("no governor pinned is a configuration error, not a pass",
+    computeVerdict({ ...healthy, anchors: {} }).verdict, RED);
+
+  // Under the governor every module ic-git runs was voted; the record is
+  // corroboration, so its absence or lag warns rather than blocks, as in
+  // ic-git's own rule.
+  check("ic-git#canister record absent -> YELLOW",
+    computeVerdict({ ...healthy, canisterRecord: null }).verdict, YELLOW);
+  check("ic-git#canister record naming another module -> YELLOW",
+    computeVerdict({ ...healthy, canisterRecord: { commit: "d".repeat(40), bundleHash: "9".repeat(64), updatedAt: 1n } }).verdict, YELLOW);
+  check("ic-git#canister record unreadable -> YELLOW",
+    computeVerdict({ ...healthy, canisterRecord: { error: "RPC down" } }).verdict, YELLOW);
 
   check("YELLOW requires acknowledgement",
-    computeVerdict({ ...healthy, attestations: [healthy.attestations[0]] }).ballot,
-    "requires-acknowledgement");
-
-  check("duplicate verifier cannot make a threshold",
-    computeVerdict({
-      ...healthy,
-      attestations: [healthy.attestations[0], { ...healthy.attestations[0] }],
-    }).verdict, YELLOW);
-
-  check("same wasm, disagreeing recipe -> RED",
-    computeVerdict({
-      ...healthy,
-      attestations: [
-        healthy.attestations[0],
-        { ...healthy.attestations[1], recipeHash: "0".repeat(64) },
-      ],
-    }).verdict, RED);
-
-  // The load-bearing one: an unauthenticated certificate must never be
-  // allowed to produce GREEN, no matter how healthy everything else is.
-  check("unverified certificate cannot reach GREEN",
-    computeVerdict({
-      ...healthy,
-      liveModuleHash: { hash: "c".repeat(64), signature: { status: "UNAVAILABLE", reason: "no BLS" } },
-    }).verdict, YELLOW);
+    computeVerdict({ ...healthy, canisterRecord: null }).ballot, "requires-acknowledgement");
 
   // Change detection may only lower. A malicious upgrade is RED from the
   // checks; the clamp must not lift it to YELLOW.
   const upgraded = computeVerdict({
     ...healthy,
-    liveModuleHash: { hash: "9".repeat(64), signature: { status: OK } },
-    attestations: [],
+    site: certified("9".repeat(64), [GOVERNOR.id]),
+    canisterRecord: { commit: "d".repeat(40), bundleHash: "9".repeat(64), updatedAt: 1n },
     lastSeenModuleHash: "c".repeat(64),
   });
   check("change detection does not raise RED to YELLOW", upgraded.verdict, RED);
@@ -423,8 +466,12 @@ group("verdict rules", () => {
   check("a benign change clamps GREEN to YELLOW", benignChange.verdict, YELLOW);
 
   check("an election with no pin -> RED", computeVerdict({ ...healthy, pin: null }).verdict, RED);
-  check("K = 0 is a configuration error, not a pass",
-    computeVerdict({ ...healthy, trusted: { verifiers: [], K: 0 } }).verdict, RED);
+
+  // The trust anchor and the code that applies it must agree: config.js pins
+  // the governor by id and module, and so does the vendored core. A re-sync
+  // that brings a successor governor must bring a new pin here too.
+  check("config.js pins the governor ic-git's core pins",
+    config.governor, Verifier.DEFAULTS.governor);
 });
 
 // --- config.js ------------------------------------------------------------
@@ -735,6 +782,22 @@ async function live(canisterId, host) {
   const certified = certifiedData(cert, principalToBytes(canisterId));
   check("certified_data matches the recomputed Merkle root", toHex(certified), root);
   check("hash tree reconstructs", hashTree(cert.tree).length, 32);
+
+  // The path the page takes for module hashes and controllers -- ic-git's
+  // vendored core verifying a state certificate end to end: delegation, BLS
+  // signature, freshness, tree -- on bytes this replica signed. The replica's
+  // own root key stands in for the pinned mainnet key here, as it does on a
+  // locally served page (provenance.js, localRootKey); the pinned key must
+  // refuse the same certificate, or the pin is not doing anything.
+  const rootKey = await localRootKey(host);
+  const st = await canisterState(host, canisterId, { rootKey });
+  check("certified read of the poll canister verifies against the replica's root key", st.certified, true);
+  check("certified module hash is 64 hex", /^[0-9a-f]{64}$/.test(st.moduleHash ?? ""), true);
+  check("certified controllers is a list", Array.isArray(st.controllers) && st.controllers.length > 0, true);
+  const pinnedKey = await canisterState(host, canisterId, {});
+  check("the pinned mainnet root key refuses the local replica's certificate", pinnedKey.certified, false);
+  check("the refusal is at the key, not later",
+    pinnedKey.checks.find((k) => !k.ok)?.id, "C2");
 
   // An update call, signed by a generated Ed25519 identity. Enrolling it needs
   // an administrative call, which the JS encoder deliberately cannot make, so

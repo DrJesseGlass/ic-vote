@@ -1,19 +1,20 @@
-// IC state certificates: hash-tree reconstruction, path lookup, and an
-// explicit hole where the signature check belongs.
+// IC state certificates: hash-tree reconstruction and path lookup. Structural
+// only, and said so at every export.
 //
-// Everything here is structural. Reconstructing the tree root and reading a
-// value out of it needs only sha256, so it is all present and exercised.
-// Deciding that the root is *authentic* needs a BLS12-381 verification of the
-// subnet signature, chained through the NNS delegation to a pinned root key --
-// which is ic-git ROADMAP dependency 1 and is not built. `verifySignature`
-// therefore returns UNAVAILABLE rather than throwing or, worse, returning
-// true.
-//
-// This is the single most important place in the codebase not to be
-// optimistic. A certificate whose structure checks out but whose signature was
-// never verified is exactly what a malicious replica would produce; treating
-// it as verified converts the project's central claim into a lie. Callers must
-// propagate UNAVAILABLE into their verdict.
+// Reconstructing the tree root and reading a value out of it needs only
+// sha256, so it is all here and exercised. Deciding that the root is
+// *authentic* -- a BLS12-381 verification of the subnet signature, chained
+// through the NNS delegation to a pinned root key -- is NOT done here. For a
+// canister's module hash and controllers the page no longer reads a
+// certificate through this file at all: provenance.canisterState hands that
+// to ic-git's vendored core, which verifies the chain before it reads the
+// tree (ic-git docs/CERTIFIED.md). What remains here serves one reader: the
+// election's `certified_head`, whose certificate the page and the CLI
+// verifier still take apart structurally (check G) without authenticating
+// it. That gap is named in docs/V0_STATUS.md; a certificate whose structure
+// checks out but whose signature was never verified is exactly what a
+// malicious replica would produce, and nothing in this file may be described
+// as proving otherwise.
 
 import { concat, equalBytes, sha256, utf8 } from "./sha256.js";
 import * as cbor from "./cbor.js";
@@ -78,42 +79,16 @@ export function parseCertificate(bytes) {
   };
 }
 
-export const CERT_UNAVAILABLE = "UNAVAILABLE";
-
-/// The unbuilt check, named so that its absence is visible in the call graph
-/// rather than implied by omission.
-///
-/// When ic-git ships the certified module-hash reader (BLS12-381 + pinned NNS
-/// root key + freshness), this becomes a real verification and the callers'
-/// verdict logic does not have to change -- they already treat anything other
-/// than a positive result as disqualifying.
-export function verifySignature(_certificate) {
-  return {
-    status: CERT_UNAVAILABLE,
-    reason:
-      "BLS12-381 verification against the pinned NNS root key is not implemented. " +
-      "It is ic-git ROADMAP dependency 1 (docs/ATTESTATION.md, 'Certified live " +
-      "module-hash read'), the highest-risk unbuilt component in the stack. " +
-      "Until it exists, no certificate on this page has been authenticated.",
-  };
-}
-
 /// certified_data for a canister, as shown by this certificate. Structural
-/// only -- see `verifySignature`.
+/// only: the certificate's signature is not checked here (see the header).
 export function certifiedData(cert, canisterBlob) {
   return lookupPath(cert.tree, ["canister", canisterBlob, "certified_data"]);
 }
 
-/// A canister's module hash, as shown by this certificate. Structural only.
-export function moduleHash(cert, canisterBlob) {
-  return lookupPath(cert.tree, ["canister", canisterBlob, "module_hash"]);
-}
-
-/// The certificate's own timestamp, in nanoseconds. Needed for the freshness
-/// bound in ic-git's step 4: without it, an attacker replays an old
-/// certificate showing the previously-verified module hash after a malicious
-/// upgrade. Parsed here so the shape is ready; it is not yet trustworthy,
-/// because an unsigned certificate can claim any time it likes.
+/// The certificate's own timestamp, in nanoseconds. Structural only: an
+/// unsigned certificate can claim any time it likes, so this is a value to
+/// show, not a freshness bound to rely on. (ic-git's core applies a real one
+/// to the certificates it verifies.)
 export function certificateTime(cert) {
   const raw = lookupPath(cert.tree, ["time"]);
   if (!raw) return null;

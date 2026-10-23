@@ -5,15 +5,17 @@
 // the product; they should be readable in one sitting and testable without a
 // replica.
 //
-// Two invariants, both inherited from ic-git's attestation doctrine, and both
+// Two invariants, both inherited from ic-git's verification doctrine, and both
 // enforced structurally rather than by care:
 //
 //   1. A check may add warnings and lower the verdict. Nothing may raise it.
 //      `worse()` is the only way the verdict moves, and it is monotone.
 //   2. "Could not check" is never "checked and fine". A check whose input is
-//      missing, unreachable, or unverifiable resolves to UNKNOWN, and UNKNOWN
-//      caps the verdict below GREEN. This is the rule that keeps the unbuilt
-//      BLS certificate verification from silently producing a GREEN page.
+//      missing, unreachable, or not certified resolves to UNKNOWN, and UNKNOWN
+//      caps the verdict below GREEN. A certificate that fails ic-git's
+//      signature chain reaches this file as `certified: false` -- not read,
+//      rather than read and believed -- and this rule is what keeps it from
+//      producing a GREEN page.
 
 export const GREEN = "GREEN";
 export const YELLOW = "YELLOW";
@@ -26,61 +28,67 @@ export const BAD = "BAD";
 const RANK = { [GREEN]: 0, [YELLOW]: 1, [RED]: 2 };
 const worse = (a, b) => (RANK[b] > RANK[a] ? b : a);
 
-/// One canister's module hash: read it, and compare it against what the
-/// election pinned. Returns the live hash, or null if it could not be
-/// established.
+const short = (h) => (h ? `${String(h).slice(0, 16)}...` : "none");
+const who = (controllers, icGit) =>
+  controllers.length === 0
+    ? "nobody"
+    : controllers.map((c) => (c === icGit ? "ic-git" : `${c.slice(0, 5)}...`)).join(", ");
+
+/// One canister's certified state, as ic-git's core reports it:
+/// `{ certified, moduleHash, controllers, stale, time, checks }`, or
+/// `{ error }` when the read could not be attempted. Records the read as a
+/// check and returns the state when the certificate was accepted, else null.
 ///
 /// Note the asymmetry between the two failure modes, because it is the
 /// weakest point in the current design and should be visible in the code
 /// rather than only in the docs: a hash that MISMATCHES is BAD (RED, ballot
-/// blocked), but a hash that cannot be READ is UNKNOWN (YELLOW, which the UI
+/// blocked), but a state that cannot be READ is UNKNOWN (YELLOW, which the UI
 /// lets a voter click past). An attacker who can make the read fail therefore
 /// gets a softer outcome than one who lets it succeed and mismatch. Closing
 /// that means deciding a voting window should hard-block on an unreachable
 /// canister, which is a change to the verdict ladder in THREAT_MODEL.md
 /// section 4, not a change to this function.
-function checkCanister(c, id, label, reading, pinned) {
-  const live = reading && !reading.error ? reading.hash : null;
-
-  if (!live) {
-    c.add(
-      `${id}-module-read`,
-      `${label}'s module hash read`,
-      UNKNOWN,
-      reading?.error ?? "could not read module_hash"
-    );
-  } else if (reading.signature?.status !== OK) {
-    // The read succeeded and the value is structurally present, but nothing
-    // has authenticated it. This is the ic-git dependency-1 hole, and it is
-    // the single reason this app cannot currently reach GREEN.
-    c.add(
-      `${id}-module-read`,
-      `${label}'s module hash read`,
-      UNKNOWN,
-      `${live.slice(0, 16)}... read from an UNAUTHENTICATED certificate: ` +
-        (reading.signature?.reason ?? "signature not verified")
-    );
-  } else {
-    c.add(`${id}-module-read`, `${label}'s module hash read`, OK, live);
+function certifiedState(c, id, label, st) {
+  const name = `${label}'s certified state`;
+  if (!st || st.error) {
+    c.add(`${id}-read`, name, UNKNOWN, st?.error ?? "not read");
+    return null;
   }
+  if (!st.certified) {
+    // ic-git's core refused the certificate: no reply, a signing key not
+    // delegated by the NNS root key, a signature that does not verify, no
+    // date, or a tree that hides the paths asked for. Nothing in it is read.
+    const bad = (st.checks ?? []).find((k) => !k.ok);
+    c.add(`${id}-read`, name, UNKNOWN, `certificate not accepted: ${bad ? `${bad.label} (${bad.detail})` : "unknown"}`);
+    return null;
+  }
+  const n = st.controllers.length;
+  const summary = `module ${short(st.moduleHash)}, ${n} controller${n === 1 ? "" : "s"}`;
+  if (st.stale) {
+    // Genuine, but about an earlier moment: a module since replaced would
+    // not show. The values are still compared below -- a mismatch in an old
+    // certificate is still a mismatch -- but the read cannot be GREEN.
+    c.add(`${id}-read`, name, UNKNOWN, `${summary}; the certificate is stale`);
+  } else {
+    c.add(`${id}-read`, name, OK, summary);
+  }
+  return st;
+}
 
-  if (!live) {
-    c.add(`${id}-module-pin`, `${label} matches the election's pin`, UNKNOWN, "no live hash to compare");
-  } else if (live === pinned) {
-    c.add(`${id}-module-pin`, `${label} matches the election's pin`, OK, live.slice(0, 16) + "...");
+/// The pin: the module hash the election froze for this canister, against
+/// its certified one.
+function checkPin(c, id, label, st, pinned) {
+  const name = `${label} matches the election's pin`;
+  if (!st) {
+    c.add(`${id}-pin`, name, UNKNOWN, "no certified hash to compare");
+  } else if (st.moduleHash === pinned) {
+    c.add(`${id}-pin`, name, OK, short(st.moduleHash));
   } else {
     // THREAT_MODEL.md 2.5: for an election specifically, a module hash that
     // differs from the one pinned for the window is a spoiling event, not a
-    // notice -- even if the new hash is itself well attested.
-    c.add(
-      `${id}-module-pin`,
-      `${label} matches the election's pin`,
-      BAD,
-      `live ${live.slice(0, 16)}... but the election pinned ${String(pinned).slice(0, 16)}...`
-    );
+    // notice -- even if the new hash is itself a voted one.
+    c.add(`${id}-pin`, name, BAD, `live ${short(st.moduleHash)} but the election pinned ${short(pinned)}`);
   }
-
-  return live;
 }
 
 class Checks {
@@ -99,23 +107,31 @@ class Checks {
 /// `input`:
 ///   pin               the election's Pin record (from get_manifest)
 ///   served            { sha256, commitHeader, repoHeader } or { error }
-///   registryRecord    { commit, bundleHash, updatedAt } | null | { error }
-///   liveModuleHash      { hash, signature: { status } } | { error } -- site
-///   livePollModuleHash  { hash, signature: { status } } | { error } -- poll
-///   attestations      array of { verifier, moduleHash, commit, recipeHash, at }
-///                     ALREADY filtered to the trusted set, one per verifier
-///   trusted           { verifiers: [...], K }
-///   lastSeenModuleHash  previously cached hash for this canister, or null
+///   registryRecord    `<repo>#site`: { commit, bundleHash, updatedAt } | null | { error }
+///   site              certified state of the serving canister, ic-git
+///                     (anchors.icGit), as provenance.canisterState reports it:
+///                     { certified, moduleHash, controllers, stale, checks }
+///                     or { error }
+///   poll              the same for the poll canister
+///   governor          the same for anchors.governor.id
+///   appRecord         `<repo>#app`: the build ic-git installed in the poll
+///                     canister, { commit, bundleHash, updatedAt } | null | { error }
+///   canisterRecord    `ic-git#canister`: the build ic-git itself runs, same shape
+///   anchors           { icGit, governor: { id, module } }, from config.js:
+///                     the canister that served this bundle, and ic-git's governor
+///   lastSeenModuleHash  previously cached hash for the site canister, or null
 export function computeVerdict(input) {
   const c = new Checks();
   const {
     pin,
     served,
     registryRecord,
-    liveModuleHash,
-    livePollModuleHash,
-    attestations = [],
-    trusted,
+    site: siteState,
+    poll: pollState,
+    governor: governorState,
+    appRecord,
+    canisterRecord,
+    anchors,
     lastSeenModuleHash = null,
   } = input;
 
@@ -123,9 +139,26 @@ export function computeVerdict(input) {
 
   if (!pin) {
     c.add("pin", "Election pins a release", BAD, "this election has no pinned release");
-    return finish(c, input);
+    return finish(c, { live: null, lastSeenModuleHash });
   }
   c.add("pin", "Election pins a release", OK, `${pin.repo} @ ${pin.commit.slice(0, 12)}`);
+
+  // The pin names a serving canister, but the pin is the election's word and
+  // the administrator writes it. Which canister served this page is known
+  // from the bundle (config.js), and section 4 treats that canister as
+  // ic-git. Taking ic-git from the pin instead would let a pin name any
+  // canister running ic-git's module -- an instance with approvers of the
+  // administrator's choosing, handed to the pinned governor as its only
+  // controller -- and the governance checks would pass against it while this
+  // page was served by the real one.
+  const icGit = anchors?.icGit ?? null;
+  if (!icGit) {
+    c.add("site-id", "Election names the serving canister", BAD, "no serving canister in config.js");
+  } else if (pin.site_canister === icGit) {
+    c.add("site-id", "Election names the serving canister", OK, icGit);
+  } else {
+    c.add("site-id", "Election names the serving canister", BAD, `the election names ${pin.site_canister}; this page was served by ${icGit}`);
+  }
 
   if (!served || served.error) {
     c.add("served", "Served bundle re-read", UNKNOWN, served?.error ?? "not attempted");
@@ -188,63 +221,118 @@ export function computeVerdict(input) {
   // mean. An earlier version of this file checked only the first, which left
   // "upgrade the canister that counts" entirely unobserved.
 
-  const live = checkCanister(c, "site", "Serving canister", liveModuleHash, pin.module_sha256);
-  checkCanister(c, "poll", "Poll canister", livePollModuleHash, pin.poll_module_sha256);
+  const site = certifiedState(c, "site", "Serving canister", siteState);
+  checkPin(c, "site", "Serving canister", site, pin.module_sha256);
+  const poll = certifiedState(c, "poll", "Poll canister", pollState);
+  checkPin(c, "poll", "Poll canister", poll, pin.poll_module_sha256);
 
-  // --- 4. K-of-N backend attestation --------------------------------------
+  // --- 4. who can change the code, and whether a vote did -----------------
+  //
+  // The pin makes a mid-window change visible. This is what establishes that
+  // the pinned value was ever the right one: not reviewers attesting a hash
+  // after the fact, but the controller structure itself, read from the same
+  // certificates, plus the record ic-git published when it deployed.
+  //
+  //   The poll canister is governed when ic-git is its only controller: its
+  //   code then changes only when the repo's approvers vote a commit through
+  //   and ic-git's deploy queue installs it, and ic-git records what it
+  //   installed on chain as `<repo>#app`. The module it runs must be that one.
+  //
+  //   ic-git is governed when its only controller is the governor pinned in
+  //   config.js: a canister with no controllers, running the pinned module,
+  //   that installs ic-git's code only when ic-git's approvers vote it
+  //   through (ic-git docs/GOVERNOR.md). It records what it runs as
+  //   `ic-git#canister`.
+  //
+  // The governor pin is the trust anchor, where the verifier set used to be:
+  // a successor governor is a Handover vote in ic-git and a new pin here,
+  // which changes this bundle's hash. The rule is ic-git's own (its core,
+  // `judge`): what ic-git blocks is BAD here, what it allows with a warning
+  // is UNKNOWN, and what it approves is OK. `icGit` is the bundle's serving
+  // canister (section 1), not the pin's.
 
-  const K = trusted?.K ?? 0;
-  if (!K) {
-    c.add("attestations", "Trusted verifier threshold configured", BAD, "K is zero; no threshold to meet");
-  } else if (!live) {
-    c.add("attestations", `${K} independent verifiers attest this wasm`, UNKNOWN, "no live hash to match against");
+  const pollGoverned = poll && poll.controllers.length === 1 && poll.controllers[0] === icGit;
+  if (!poll) {
+    c.add("poll-governed", "Poll canister is governed by ic-git", UNKNOWN, "no certified controllers");
+  } else if (pollGoverned) {
+    c.add("poll-governed", "Poll canister is governed by ic-git", OK, "ic-git is its only controller; its code changes only by an approved commit's deploy");
   } else {
-    // Dedupe by verifier before counting. ic-git's contract sorts and requires
-    // strictly ascending addresses for exactly this reason: a duplicate in the
-    // trusted set would turn one attestation into a threshold.
-    const byVerifier = new Map();
-    for (const a of attestations) {
-      if (a && a.moduleHash === live) byVerifier.set(a.verifier.toLowerCase(), a);
-    }
-    const agreeing = [...byVerifier.values()];
-    const recipes = new Set(agreeing.map((a) => `${a.commit}/${a.recipeHash}`));
-
-    if (agreeing.length === 0) {
-      c.add(
-        "attestations",
-        `${K} independent verifiers attest this wasm`,
-        BAD,
-        "no trusted verifier has attested the module hash this canister is running"
-      );
-    } else if (agreeing.length < K) {
-      c.add(
-        "attestations",
-        `${K} independent verifiers attest this wasm`,
-        UNKNOWN,
-        `only ${agreeing.length} of ${K} trusted verifiers have attested it`
-      );
-    } else if (recipes.size !== 1) {
-      // Same wasm, different claimed source or build recipe. That is a
-      // disagreement about what the canister IS, and ic-git's step 4 requires
-      // agreement on one (commit, recipeHash).
-      c.add(
-        "attestations",
-        `${K} independent verifiers attest this wasm`,
-        BAD,
-        `${agreeing.length} verifiers agree on the module hash but disagree about ` +
-          `(commit, recipeHash): ${[...recipes].join(" vs ")}`
-      );
+    c.add(
+      "poll-governed",
+      "Poll canister is governed by ic-git",
+      BAD,
+      `controlled by ${who(poll.controllers, icGit)}, who can change the code that counts without a vote`
+    );
+  }
+  if (pollGoverned) {
+    const name = "Poll canister runs the build ic-git recorded";
+    if (!appRecord) {
+      // Not an error: the record was read and is absent. ic-git publishes
+      // one with every install into a governed canister, so a governed
+      // canister with none has no approved build on record, and ic-git's
+      // own rule blocks it.
+      c.add("poll-record", name, appRecord === null ? BAD : UNKNOWN, appRecord === null ? `the registry holds no "${pin.repo}#app" record: no approved build is on record` : "not read");
+    } else if (appRecord.error) {
+      c.add("poll-record", name, UNKNOWN, appRecord.error);
+    } else if (poll.moduleHash === appRecord.bundleHash) {
+      c.add("poll-record", name, OK, `the approved build of commit ${appRecord.commit.slice(0, 12)}`);
     } else {
-      c.add(
-        "attestations",
-        `${K} independent verifiers attest this wasm`,
-        OK,
-        `${agreeing.length} of ${trusted.verifiers.length} trusted verifiers agree`
-      );
+      c.add("poll-record", name, BAD, `runs ${short(poll.moduleHash)} where the record approves ${short(appRecord.bundleHash)} (commit ${appRecord.commit.slice(0, 12)})`);
     }
   }
 
-  return finish(c, { ...input, live, lastSeenModuleHash });
+  const gov = anchors?.governor;
+  const siteGoverned = site && gov && site.controllers.length === 1 && site.controllers[0] === gov.id;
+  if (!gov) {
+    c.add("site-governed", "Serving canister is governed", BAD, "no governor pinned in config.js");
+  } else if (!site) {
+    c.add("site-governed", "Serving canister is governed", UNKNOWN, "no certified controllers");
+  } else if (siteGoverned) {
+    c.add("site-governed", "Serving canister is governed", OK, `its only controller is the pinned governor ${gov.id.slice(0, 5)}...`);
+  } else {
+    c.add(
+      "site-governed",
+      "Serving canister is governed",
+      BAD,
+      `controlled by ${who(site.controllers, icGit)}, not the governor pinned in config.js`
+    );
+  }
+  if (gov) {
+    const name = "The governor is the recorded one";
+    const g = certifiedStateQuiet(governorState);
+    if (!g) {
+      c.add("governor", name, UNKNOWN, governorState?.error ?? "its state could not be certified");
+    } else if (g.controllers.length) {
+      c.add("governor", name, BAD, `the governor is itself controlled by ${who(g.controllers, icGit)}`);
+    } else if (g.moduleHash !== gov.module) {
+      c.add("governor", name, BAD, `the governor runs module ${short(g.moduleHash)}, not the pinned ${short(gov.module)}`);
+    } else {
+      c.add("governor", name, OK, "no controllers; runs the pinned module, so its rules cannot change");
+    }
+  }
+  if (siteGoverned) {
+    // Under the governor every module ic-git runs was installed by a vote,
+    // so the record is corroboration, not the claim: a record that lags an
+    // upgrade, or was never written, is a warning, as in ic-git's own rule.
+    const name = "Serving canister runs the build it recorded";
+    if (!canisterRecord) {
+      c.add("site-record", name, UNKNOWN, canisterRecord === null ? "the registry holds no ic-git#canister record" : "not read");
+    } else if (canisterRecord.error) {
+      c.add("site-record", name, UNKNOWN, canisterRecord.error);
+    } else if (site.moduleHash === canisterRecord.bundleHash) {
+      c.add("site-record", name, OK, `the recorded build of commit ${canisterRecord.commit.slice(0, 12)}`);
+    } else {
+      c.add("site-record", name, UNKNOWN, `runs ${short(site.moduleHash)} where the record names ${short(canisterRecord.bundleHash)}: an upgrade the record does not name yet`);
+    }
+  }
+
+  return finish(c, { live: site?.moduleHash ?? null, lastSeenModuleHash });
+}
+
+/// A certified state without the check entry: for the governor, whose read
+/// is reported as part of one judgment rather than as a read of its own.
+function certifiedStateQuiet(st) {
+  return st && !st.error && st.certified ? st : null;
 }
 
 function finish(c, { live, lastSeenModuleHash }) {
@@ -253,11 +341,11 @@ function finish(c, { live, lastSeenModuleHash }) {
 
   // --- 5. change detection, applied LAST and only downward ----------------
   //
-  // The ordering is the whole point (ic-git docs/ATTESTATION.md step 7): a
-  // controller who upgrades the canister to malicious code produces a hash no
-  // trusted verifier has attested, which the checks above already made RED.
-  // Assigning YELLOW here would RAISE that verdict and present the exact
-  // attack this system exists to catch as a soft caution.
+  // The ordering is the whole point: a controller who upgrades the canister
+  // to malicious code produces a hash the pin does not name, which the checks
+  // above already made RED. Assigning YELLOW here would RAISE that verdict
+  // and present the exact attack this system exists to catch as a soft
+  // caution.
   if (live && lastSeenModuleHash && live !== lastSeenModuleHash) {
     warnings.push(
       `The serving canister's code changed since this browser last looked ` +

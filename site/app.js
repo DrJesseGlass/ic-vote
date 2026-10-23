@@ -6,7 +6,7 @@
 // set alongside it. A layout where the ballot is present and later disabled
 // has a window in which it is present and enabled.
 
-import { configFromURL, pageURL } from "./config.js";
+import { configFromURL, isLocal, pageURL } from "./config.js";
 import { Agent, Ed25519Identity } from "./lib/agent.js";
 import { toHex, fromHex } from "./lib/sha256.js";
 import * as prov from "./lib/provenance.js";
@@ -200,55 +200,60 @@ function describeError(err) {
 
 async function verifyProvenance(seq = state.loadSeq) {
   const pin = state.current?.manifest?.pin ?? null;
+  const cfg = state.config;
 
-  const served = await attempt(() => prov.servedBundle(new URL("./index.html", pageURL()).href));
-  const registryRecord = pin
-    ? await attempt(async () => {
-        const rpc = state.config.rpc[Number(pin.registry_chain_id)];
-        if (!rpc) throw new Error(`no RPC endpoint configured for chain ${pin.registry_chain_id}`);
-        // ic-git namespaces the served-site record; reading the bare repo name
-        // would fetch the deploy-artifact record, whose bundleHash is the
-        // sha256 of contract bytecode and would never match a page.
-        return prov.registrySite(rpc, pin.registry_address, `${pin.repo}#site`);
-      })
-    : null;
+  // The registry: the site record, the build ic-git installed in the poll
+  // canister, and the build ic-git itself runs. ic-git namespaces its records;
+  // the bare repo name would be the deploy-artifact record, whose hash is of
+  // contract bytecode and would never match a page.
+  const rpc = pin ? cfg.rpc[Number(pin.registry_chain_id)] : null;
+  const record = (key) =>
+    attempt(async () => {
+      if (!rpc) throw new Error(`no RPC endpoint configured for chain ${pin.registry_chain_id}`);
+      return prov.registryRecord(rpc, pin.registry_address, key);
+    });
 
-  // Both canisters, not just the one serving this page. The poll canister is
-  // the one that counts the ballots, so its code is at least as load-bearing
-  // as the page's; reading only the site canister left an upgrade of the
-  // tallying code invisible to every voter.
-  const liveModuleHash = pin
-    ? await attempt(() => prov.canisterModuleHash(state.agent, pin.site_canister))
-    : null;
-  const livePollModuleHash = pin
-    ? await attempt(() => prov.canisterModuleHash(state.agent, state.config.pollCanisterId))
-    : null;
-
-  const attestations = [];
-  if (pin && state.config.trusted.verifiers.length) {
-    const rpc = state.config.rpc[Number(pin.registry_chain_id)];
-    for (const verifier of state.config.trusted.verifiers) {
-      const a = await attempt(() =>
-        prov.registryAttestation(rpc, pin.registry_address, pin.site_canister, verifier)
-      );
-      if (a && !a.error) attestations.push(a);
-    }
+  // The canisters, on the IC's word: the one serving this page, the one that
+  // counts the ballots, and ic-git's governor. All three, because the first
+  // two have different controllers and different powers, and the third is
+  // what makes the first one's controller mean anything. On a local replica
+  // the certificates are signed by the replica's own key, which is read from
+  // it; that proves nothing about the replica, as config.js says of every
+  // local override, but it runs the same verification path end to end. Off
+  // this machine the key is the one ic-git's core pins.
+  const reads = {};
+  if (isLocal(pageURL())) {
+    const key = await attempt(() => prov.localRootKey(cfg.host));
+    if (typeof key === "string") reads.rootKey = key;
   }
+  const canister = (id) => attempt(() => prov.canisterState(cfg.host, id, reads));
+
+  const [served, registryRecord, appRecord, canisterRecord, site, poll, governor] = await Promise.all([
+    attempt(() => prov.servedBundle(new URL("./index.html", pageURL()).href)),
+    pin ? record(`${pin.repo}#site`) : null,
+    pin ? record(`${pin.repo}#app`) : null,
+    pin ? record("ic-git#canister") : null,
+    pin ? canister(cfg.siteCanisterId) : null,
+    pin ? canister(cfg.pollCanisterId) : null,
+    pin ? canister(cfg.governor.id) : null,
+  ]);
 
   const verdict = computeVerdict({
     pin,
     served,
     registryRecord,
-    liveModuleHash,
-    livePollModuleHash,
-    attestations,
-    trusted: state.config.trusted,
+    appRecord,
+    canisterRecord,
+    site,
+    poll,
+    governor,
+    anchors: { icGit: cfg.siteCanisterId, governor: cfg.governor },
     lastSeenModuleHash: localStorage.getItem(LAST_MODULE_HASH_KEY),
   });
 
   // Cache AFTER computing, so this load's own read cannot suppress the change
-  // warning it should have raised.
-  if (liveModuleHash?.hash) localStorage.setItem(LAST_MODULE_HASH_KEY, liveModuleHash.hash);
+  // warning it should have raised. Only a certified hash is worth remembering.
+  if (site?.certified && site.moduleHash) localStorage.setItem(LAST_MODULE_HASH_KEY, site.moduleHash);
 
   // A newer election was selected while the reads above were in flight; its
   // own verifyProvenance owns the verdict panel now.

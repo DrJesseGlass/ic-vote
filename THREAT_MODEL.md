@@ -16,7 +16,7 @@ able to, and any change that adds a row is a design regression.
 |---|---|---|---|
 | T1 | The IC subnet (supermajority honest) | Executes the canister, certifies state, holds vetKD shares; sees every submission's arrival time and ordering (2.7) | No -- it is the platform |
 | T2 | The voter's browser and OS | Sees the plaintext choice before encryption | **No** -- hard floor of remote voting |
-| T3 | K independent build reviewers (not all colluding) | Bridge from certified module hash to auditable source | No, but it amortizes -- one review covers every election |
+| T3 | The approvers of the ic-vote repo on ic-git (K of N, not all colluding), and of ic-git's own code through its governor | Bridge from certified module hash to auditable source: nothing is installed in either governed canister that they did not vote through, and each install is recorded on chain | No, but it amortizes -- one approval covers every election run on that build |
 | T4 | The eligibility issuer (whoever defines the roll) | Decides who is a voter | No -- this is a political question, not a cryptographic one |
 | T5 | The HTTP gateway | For *non-verifying users*: delivers the bundle and can lie about it. For **everyone**: sees the source IP and timing of every request, including ballot submissions (2.7) | Integrity: yes, per-user, by running the verifier. Metadata: no |
 | T6 | The election administrator, for *availability* only | Can stop or delay an election | Partially (open bulletin board makes censorship evident) |
@@ -24,7 +24,8 @@ able to, and any change that adds a row is a design regression.
 
 Deliberately **not** on the list, and this is the point of the project:
 
-- the server operator's honesty about what code is running (T3 replaces it);
+- the server operator's honesty about what code is running (T3 replaces it,
+  and the controller structure is read from the IC's certificates, not asked);
 - the CI pipeline, its secrets, and everyone with commit access to it
   (no standing deploy credential exists);
 - the DNS registrar and CDN (no mutable hosting layer);
@@ -43,8 +44,10 @@ the wrong thing correctly.
 is the open problem described in VISION.md section 2.
 
 *Here:* the served bundle's sha256 is bound on-chain to a commit; the serving
-canister's module hash is attested by K reviewers; the client-side verifier
-checks both before the voter marks a ballot. Targeted delivery is *worse* for
+canister's module hash and controllers are read from a certificate the IC
+signed, and the canister must be governed -- its only controller the pinned
+governor, its module the one its approvers' vote recorded; the client-side
+verifier checks all of it before the voter marks a ballot. Targeted delivery is *worse* for
 the attacker than blanket delivery, because a single verifying voter's
 mismatch is evidence.
 
@@ -90,13 +93,13 @@ recomputes. We invent nothing here and should resist the temptation to.
 
 *Attack:* the canister is upgraded partway through voting to malicious code.
 
-*Mitigation:* ic-git's change detection -- cache the certified module hash,
-re-read on every load and on a timer; a changed hash with no matching trusted
-attestation is RED, and a changed hash *with* matching attestations still
-clamps the verdict to YELLOW pending re-verification. For an election
-specifically, we should additionally **pin the expected module hash for the
-duration of the voting window** and treat any change as a spoiling event
-requiring administrator disclosure.
+*Mitigation:* the election **pins the expected module hash of both canisters
+for the duration of the voting window**, and the page reads each canister's
+live hash out of a certificate the IC signed, verified by ic-git's core; any
+change is a spoiling event (RED) requiring administrator disclosure, even a
+change that was itself voted. Change detection on top: the serving
+canister's last-seen hash is cached, and a difference clamps to YELLOW, never
+upward.
 
 *Which canisters:* **both**, and this needs saying because the first
 implementation only did one. The canister serving the ballot page and the
@@ -107,10 +110,17 @@ each (`Pin.module_sha256`, `Pin.poll_module_sha256`). Pinning only the serving
 canister leaves "upgrade the thing that counts" entirely unobserved, which is
 the state this project shipped in until a review caught it.
 
-*Limit:* the pin makes a *change* visible; it does not establish that the
-pinned value was ever the right one. Only the K-of-N attestation on that hash
-does that, and it is unbuilt (T3, ROADMAP.md dependency 2). A pin whose
-starting value the administrator chose freely is a tripwire, not a proof.
+*Limit:* the pin makes a *change* visible; it does not by itself establish
+that the pinned value was ever the right one. What does is section 4 of the
+verdict (T3): the poll canister's only controller must be ic-git and its hash
+the build ic-git recorded for an approved commit; the serving canister's only
+controller must be the pinned governor and its hash ic-git's recorded build.
+A pin the administrator chose freely is a tripwire; the pin plus those checks
+is the claim. Which canister is ic-git in those checks comes from the bundle
+(`config.js`), not from the pin's `site_canister`, and the pin must name it:
+a pin the administrator wrote could otherwise name another instance of
+ic-git's module, with approvers of their choosing, and pass the checks
+against it.
 
 ### 2.6 Eligibility fraud / Sybil
 
@@ -227,13 +237,18 @@ than shipping nothing.
 Mirroring ic-git's GREEN/YELLOW/RED doctrine, computed before any change-
 detection clamp is applied:
 
-- **GREEN** -- served bundle matches the attested commit; the serving
-  canister's certified module hash has K trusted attestations agreeing on one
-  commit and recipeHash; the election's pinned module hash matches.
-- **YELLOW** -- bundle matches, but the backend has fewer than K attestations,
-  or the module hash changed and is awaiting re-verification.
-- **RED** -- bundle mismatch, no trusted attestation matches the live module
-  hash, or the pinned election hash changed.
+- **GREEN** -- served bundle matches the recorded commit; both canisters'
+  certified module hashes match the election's pins; the poll canister is
+  governed by ic-git and runs the build ic-git recorded; ic-git is governed
+  by the pinned governor and runs the build it recorded.
+- **YELLOW** -- something could not be checked: a certificate the core
+  refused or could not fetch, a stale certificate, a registry record missing
+  or unreadable, ic-git running a voted module its record does not name yet;
+  or the serving canister's hash changed since this browser last looked.
+- **RED** -- bundle mismatch; a canister's hash off its pin; a poll canister
+  anyone but ic-git can change, or running a build no record approves; a
+  serving canister not under the pinned governor; a governor that is not the
+  recorded one.
 
 A RED verdict during an open voting window is an incident, not a warning
 banner, and the UI should treat it that way.

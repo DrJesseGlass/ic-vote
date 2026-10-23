@@ -14,9 +14,9 @@ The reason for that order: client verifiability is the thing we uniquely have
 (VISION.md section 3), and every later rung's cryptography is worthless
 without it -- encrypting a ballot the client already misread proves nothing.
 
-Facts below were verified in July 2026; sources at the end. Re-check the
-load-bearing numbers before depending on them, per ic-git ROADMAP.md
-discipline.
+The IC primitives below were verified in July 2026 and the ic-git
+dependencies in October 2026; sources at the end. Re-check the load-bearing
+numbers before depending on them, per ic-git ROADMAP.md discipline.
 
 ## Verified IC primitives
 
@@ -120,10 +120,13 @@ need to design around a test key. Re-verified 2026-07-26; details below.
 checkpointing. Relevant at V0 for anchoring the final tally hash.
 
 **Certified state / response certification** -- the basis of the bundle
-verification; ic-git's `docs/ATTESTATION.md` specifies the certified
-module-hash read (BLS12-381 + pinned NNS root key + freshness). **That reader
-is the highest-risk unbuilt component in the whole stack and ic-vote depends
-on it.** It is the first thing to prototype, in ic-git, not here.
+verification. ic-git's certified reader (`core/verifier.js`,
+docs/CERTIFIED.md: BLS12-381 against the pinned NNS root key through the
+subnet delegation, a five-minute freshness bound, pruned paths refused)
+shipped in ic-git v0.3.4 and is vendored here whole
+(`site/lib/ic-git-core.js`, `tools/sync-ic-git-core.mjs`). It was the
+highest-risk unbuilt component in the stack; it is built, and the ballot page
+reads every module hash and controller list through it.
 
 ## V0 -- verifiable client, public ballots
 
@@ -136,6 +139,10 @@ on it.** It is the first thing to prototype, in ic-git, not here.
 - The frontend lives in this repo, is pushed to ic-git, served by the git
   canister from the committed bundle, and attested in the ProvenanceRegistry
   as `<repo>#site`.
+- The poll canister is governed by ic-git (its only controller), changes
+  only by the approvers' vote on a commit, and each install is recorded as
+  `<repo>#app`; the page reads its module hash and controllers through a
+  verified certificate and refuses anything else.
 - The voter-facing verifier reports GREEN/YELLOW/RED per THREAT_MODEL.md
   section 4 before the ballot can be marked.
 - Final tally hash checkpointed to the registry, and to Solana once ic-git's
@@ -272,9 +279,14 @@ The subnet will derive the election key for whoever the poll canister asks it
 to. A controller who can upgrade the canister can therefore add a "derive now"
 path and read every ballot before close, and no amount of client attestation
 sees it. This is exactly REPRODUCIBLE_BUILD.md's temporal-trust residual,
-arriving with teeth: before any election with real secrecy claims, the poll
-canister's upgrade path must be under governance or blackholed, and the
-verifier should surface the controller set alongside the module hash.
+arriving with teeth. The structure for it is in place since V0 (dependency 2
+below): the poll canister is governed, ic-git is its only controller, and the
+verifier reads the controller set alongside the module hash and goes RED on
+any other controller. What V1 adds is the stake: at V0 a rogue install can
+miscount, which the public ballots expose; at V1 it can read ballots before
+close, which nothing exposes. So the residual is the approvers' K of N
+(THREAT_MODEL.md T3), and before any election with real secrecy claims that
+set and threshold must be chosen for that, not for convenience.
 
 ## V2 -- eligibility beyond the closed roll
 
@@ -315,24 +327,43 @@ acceptable and truthful outcome.
 
 ## Dependencies on ic-git
 
-ic-vote cannot ship V0 until ic-git provides:
+What V0 needs from ic-git, and where each stands:
 
-1. **Certified module-hash reader** (BLS + NNS root key + freshness) --
-   `docs/ATTESTATION.md`, unbuilt, highest risk.
-2. **Registry `attest()` + K-of-N verifier tooling** -- specified, unbuilt.
-   The live Sepolia registry is the `set`/`get` one.
+1. **Certified module-hash reader** (BLS + NNS root key + freshness) -- done:
+   ic-git v0.3.4, docs/CERTIFIED.md, and consumed here since 2026-10-22.
+   `provenance.canisterState` hands a canister id to the vendored core and
+   gets back its module hash and controllers, read only after the certificate
+   chain verified; `site/lib/certificate.js` keeps only the structural tree
+   code, for the election's own `certified_head`.
+2. **Registry `attest()` + K-of-N verifier tooling** -- superseded. ic-git did
+   not build third-party attestation; it built governance
+   (docs/GOVERNANCE.md): a repo's app canister can be governed -- ic-git its
+   only controller, code changing only by the approvers' K-of-N vote on a
+   commit, each install recorded on chain as `<repo>#app` -- and ic-git
+   itself is controlled by a governor canister with no controllers, whose
+   installs are votes of ic-git's approvers, recorded as `ic-git#canister`.
+   ic-vote's poll canister has been governed since 2026-10-08. The page
+   checks both canisters that way (`site/lib/verifier.js`, section 4), and
+   the trusted verifier set is gone from `config.js`; the governor pin took
+   its place. Not given by this: a count of independent reproductions by
+   parties outside the approvers (THREAT_MODEL.md T3 is now the approvers).
 3. **`registry_publish_site` exercised on mainnet** -- done. ic-git's
    `evm_registry_publish_site` has written `ic-vote#site` from the mainnet
-   canister's EOA to the Sepolia registry, most recently 2026-09-29 (tx
-   0xf50639fce229c51505baeef7800b2da2c3434a451c8c9b5f7e6b1bcdf2b3dfa0,
-   ic-git commit 7cea175), verified by ic-git's tools/verify.mjs and its
-   browser loader; the loader's own record went through the same path.
+   canister's EOA to the Sepolia registry, most recently 2026-09-30 (tx
+   0x8375da181dd742cc4c223bfb80a626e89e82e8bafd8ba2f59f3a458860decf10,
+   ic-git commit 4c500e4, the first with the stylesheet inlined), verified
+   by ic-git's tools/verify.mjs, its browser loader, and its extension,
+   which opens the page without the stop page and shows YELLOW; the
+   loader's own record went through the same path.
 4. **Multi-chain EVM config** -- currently single-chain (Sepolia); needed to
    put the election's provenance on the chain the organization actually uses.
 
-Items 1 and 2 are the ic-git critical path for this project. Nothing in
-ic-vote should start before item 1 has a prototype, because a failure there
-changes the whole design.
+Item 4 is what remains on ic-git's side. One gap is this repo's: the
+election's own `certified_head` certificate (check G) is still taken apart
+structurally and not authenticated, because ic-git's reader is built around
+the two canister paths it needs; a certificate verifier for arbitrary paths,
+exported from the core, is a small addition there and is tracked in
+docs/V0_STATUS.md.
 
 ## Sources
 

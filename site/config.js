@@ -1,12 +1,12 @@
 // Deployment configuration, and the trust anchors that go with it.
 //
-// This file is INSIDE the attested bundle, deliberately. The trusted verifier
-// set and the threshold K are the web of trust this page applies (ic-git
-// docs/ATTESTATION.md: "the web of trust lives in the client, not the chain").
-// If they lived in a fetched config, an attacker who could serve a config
-// could set K = 0 or name themselves a verifier, and the bundle hash would not
-// change. Editing this file changes the bundle hash, which invalidates the
-// attestation, which is exactly the alarm you want.
+// This file is INSIDE the verified bundle, deliberately. The governor pin
+// below, the registry endpoints and the serving canister are the web of trust
+// this page applies (ic-git docs/GOVERNANCE.md: the client decides whom it
+// trusts; the chain only records). If they lived in a fetched config, an
+// attacker who could serve a config could name a governor of their own, and
+// the bundle hash would not change. Editing this file changes the bundle
+// hash, which breaks the page's record, which is exactly the alarm you want.
 //
 // Reviewers: the addresses below are as load-bearing as any line of code here.
 
@@ -18,8 +18,13 @@ export const config = {
   /// The poll canister holding elections. Set at deploy time.
   pollCanisterId: null,
 
-  /// The ic-git canister serving this bundle. Read from the election's pin at
-  /// runtime; this is only a fallback for the pre-election screen.
+  /// The ic-git canister serving this bundle, set at deploy time with the
+  /// poll canister. A trust anchor, not a fallback: the verdict reads this
+  /// canister's state and treats it as ic-git, and the election's pin must
+  /// name it. The pin is the administrator's word; if the page took ic-git
+  /// from the pin, a pin could name another instance of ic-git's module with
+  /// approvers of the administrator's choosing, and the governance checks
+  /// would be made against that instead of the canister that served the page.
   siteCanisterId: "umobs-yiaaa-aaaab-agyrq-cai",
 
   /// EVM JSON-RPC endpoints by chain id. The election's pin names the chain.
@@ -28,18 +33,23 @@ export const config = {
     100: "https://rpc.gnosischain.com",
   },
 
-  /// Trusted build verifiers, and how many must agree.
+  /// ic-git's governor: the canister that alone controls the serving
+  /// canister, has no controllers of its own, and installs ic-git's code only
+  /// when ic-git's approvers vote it through (ic-git docs/GOVERNOR.md). Pinned
+  /// here by id AND module hash, as ic-git's own core pins it (its DEFAULTS;
+  /// tools/test-site-lib.mjs checks the two agree): "a canister nobody
+  /// controls" would not do, since an immutable controller is only as good
+  /// as the code it runs. A successor governor is a Handover vote in ic-git
+  /// and a new pin here, which changes this bundle's hash -- the alarm above.
   ///
-  /// EMPTY ON PURPOSE. ic-git's registry `attest()` and its K-of-N verifier
-  /// tooling are specified but unbuilt (ROADMAP.md dependency 2), so there is
-  /// nobody to list yet. Inventing placeholder addresses here would produce a
-  /// page that looks configured and verifies nothing -- the exact failure this
-  /// project is about. With an empty set, the attestation check reports that
-  /// no trusted verifier has attested the running wasm, and the verdict is
-  /// correspondingly not GREEN.
-  trusted: {
-    verifiers: [],
-    K: 2,
+  /// This replaces the trusted verifier set of the first design. What vouches
+  /// for the code the canisters run is no longer reviewers attesting a hash
+  /// after the fact but the controller structure itself: who can install
+  /// code, read from the IC's certificates, and the record ic-git publishes
+  /// when it does (site/lib/verifier.js, section 4).
+  governor: {
+    id: "7kkwl-baaaa-aaaab-ag6rq-cai",
+    module: "a71ff65df07a3d3b79e383f7bf8b7bf912fd0bac5135936ed2c4cd90b68a641f",
   },
 };
 
@@ -82,9 +92,9 @@ export function isLocal(url) {
 /// own page.
 ///
 /// Note what is and is not overridable: the canister and host can be pointed
-/// at a local replica, but the trusted verifier set and K cannot, because a
-/// URL parameter that could weaken the trust anchors would be a phishing
-/// primitive -- send a voter a link with K=0 and the page renders confident.
+/// at a local replica, but the governor pin cannot, because a URL parameter
+/// that could weaken the trust anchors would be a phishing primitive -- send
+/// a voter a link naming a governor of your own and the page renders confident.
 /// The same holds for the canister and host on a deployed page: a link with
 /// ?canister=<theirs> would hand a voter's page to someone else's poll
 /// canister, so off this machine the parameters are ignored.
