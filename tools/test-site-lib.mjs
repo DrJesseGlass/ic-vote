@@ -38,7 +38,7 @@ import { Agent, Ed25519Identity, requestId } from "../site/lib/agent.js";
 import { certifiedData, parseCertificate, hashTree } from "../site/lib/certificate.js";
 import * as eh from "../site/lib/election-hash.js";
 import { config, configFromURL, hostFor, isLocal, pageURL } from "../site/config.js";
-import { computeVerdict, GREEN, YELLOW, RED } from "../site/lib/verifier.js";
+import { computeVerdict, GREEN, YELLOW, RED, BAD } from "../site/lib/verifier.js";
 import { canisterState, localRootKey } from "../site/lib/provenance.js";
 import { Verifier } from "../site/lib/ic-git-core.js";
 
@@ -319,7 +319,7 @@ group("verdict rules", () => {
     governor: certified(GOVERNOR.module, []),
     appRecord: { commit: "a".repeat(40), bundleHash: "7".repeat(64), updatedAt: 1n },
     canisterRecord: { commit: "d".repeat(40), bundleHash: "c".repeat(64), updatedAt: 1n },
-    anchors: { governor: GOVERNOR },
+    anchors: { icGit: IC_GIT, governor: GOVERNOR },
   };
   const detailOf = (verdict, id) => verdict.checks.find((k) => k.id === id)?.detail ?? "";
 
@@ -386,6 +386,25 @@ group("verdict rules", () => {
     }).verdict, RED);
 
   // --- governance: what vouches for the pinned values ---------------------
+
+  // Which canister is ic-git comes from the bundle, not the pin. A pin that
+  // names another canister is RED on its own; and the governance checks are
+  // made against the bundle's canister, so a poll controlled by the pin's
+  // impostor -- running ic-git's module, under the pinned governor -- is RED
+  // too, not GREEN.
+  const OTHER = "aaaaa-aa";
+  const impostor = computeVerdict({
+    ...healthy,
+    pin: { ...pin, site_canister: OTHER },
+    poll: certified("7".repeat(64), [OTHER]),
+  });
+  check("a pin naming another serving canister -> RED", impostor.verdict, RED);
+  check("the verdict names both canisters",
+    detailOf(impostor, "site-id").includes(OTHER) && detailOf(impostor, "site-id").includes(IC_GIT), true);
+  check("a poll controlled by the pin's canister is not governed by ic-git",
+    impostor.checks.find((k) => k.id === "poll-governed")?.state, BAD);
+  check("no serving canister in config.js is a configuration error, not a pass",
+    computeVerdict({ ...healthy, anchors: { governor: GOVERNOR } }).verdict, RED);
 
   const notGoverned = computeVerdict({ ...healthy, poll: certified("7".repeat(64), ["aaaaa-aa", IC_GIT]) });
   check("poll canister with a controller besides ic-git -> RED", notGoverned.verdict, RED);

@@ -233,7 +233,7 @@ async function verifyProvenance(seq = state.loadSeq) {
     pin ? record(`${pin.repo}#site`) : null,
     pin ? record(`${pin.repo}#app`) : null,
     pin ? record("ic-git#canister") : null,
-    pin ? canister(pin.site_canister) : null,
+    pin ? canister(cfg.siteCanisterId) : null,
     pin ? canister(cfg.pollCanisterId) : null,
     pin ? canister(cfg.governor.id) : null,
   ]);
@@ -247,7 +247,7 @@ async function verifyProvenance(seq = state.loadSeq) {
     site,
     poll,
     governor,
-    anchors: { governor: cfg.governor },
+    anchors: { icGit: cfg.siteCanisterId, governor: cfg.governor },
     lastSeenModuleHash: localStorage.getItem(LAST_MODULE_HASH_KEY),
   });
 

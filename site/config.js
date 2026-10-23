@@ -18,8 +18,13 @@ export const config = {
   /// The poll canister holding elections. Set at deploy time.
   pollCanisterId: null,
 
-  /// The ic-git canister serving this bundle. Read from the election's pin at
-  /// runtime; this is only a fallback for the pre-election screen.
+  /// The ic-git canister serving this bundle, set at deploy time with the
+  /// poll canister. A trust anchor, not a fallback: the verdict reads this
+  /// canister's state and treats it as ic-git, and the election's pin must
+  /// name it. The pin is the administrator's word; if the page took ic-git
+  /// from the pin, a pin could name another instance of ic-git's module with
+  /// approvers of the administrator's choosing, and the governance checks
+  /// would be made against that instead of the canister that served the page.
   siteCanisterId: "umobs-yiaaa-aaaab-agyrq-cai",
 
   /// EVM JSON-RPC endpoints by chain id. The election's pin names the chain.

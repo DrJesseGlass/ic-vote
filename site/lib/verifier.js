@@ -108,8 +108,8 @@ class Checks {
 ///   pin               the election's Pin record (from get_manifest)
 ///   served            { sha256, commitHeader, repoHeader } or { error }
 ///   registryRecord    `<repo>#site`: { commit, bundleHash, updatedAt } | null | { error }
-///   site              certified state of pin.site_canister (ic-git), as
-///                     provenance.canisterState reports it:
+///   site              certified state of the serving canister, ic-git
+///                     (anchors.icGit), as provenance.canisterState reports it:
 ///                     { certified, moduleHash, controllers, stale, checks }
 ///                     or { error }
 ///   poll              the same for the poll canister
@@ -117,7 +117,8 @@ class Checks {
 ///   appRecord         `<repo>#app`: the build ic-git installed in the poll
 ///                     canister, { commit, bundleHash, updatedAt } | null | { error }
 ///   canisterRecord    `ic-git#canister`: the build ic-git itself runs, same shape
-///   anchors           { governor: { id, module } }, from config.js
+///   anchors           { icGit, governor: { id, module } }, from config.js:
+///                     the canister that served this bundle, and ic-git's governor
 ///   lastSeenModuleHash  previously cached hash for the site canister, or null
 export function computeVerdict(input) {
   const c = new Checks();
@@ -141,6 +142,23 @@ export function computeVerdict(input) {
     return finish(c, { live: null, lastSeenModuleHash });
   }
   c.add("pin", "Election pins a release", OK, `${pin.repo} @ ${pin.commit.slice(0, 12)}`);
+
+  // The pin names a serving canister, but the pin is the election's word and
+  // the administrator writes it. Which canister served this page is known
+  // from the bundle (config.js), and section 4 treats that canister as
+  // ic-git. Taking ic-git from the pin instead would let a pin name any
+  // canister running ic-git's module -- an instance with approvers of the
+  // administrator's choosing, handed to the pinned governor as its only
+  // controller -- and the governance checks would pass against it while this
+  // page was served by the real one.
+  const icGit = anchors?.icGit ?? null;
+  if (!icGit) {
+    c.add("site-id", "Election names the serving canister", BAD, "no serving canister in config.js");
+  } else if (pin.site_canister === icGit) {
+    c.add("site-id", "Election names the serving canister", OK, icGit);
+  } else {
+    c.add("site-id", "Election names the serving canister", BAD, `the election names ${pin.site_canister}; this page was served by ${icGit}`);
+  }
 
   if (!served || served.error) {
     c.add("served", "Served bundle re-read", UNKNOWN, served?.error ?? "not attempted");
@@ -230,9 +248,9 @@ export function computeVerdict(input) {
   // a successor governor is a Handover vote in ic-git and a new pin here,
   // which changes this bundle's hash. The rule is ic-git's own (its core,
   // `judge`): what ic-git blocks is BAD here, what it allows with a warning
-  // is UNKNOWN, and what it approves is OK.
+  // is UNKNOWN, and what it approves is OK. `icGit` is the bundle's serving
+  // canister (section 1), not the pin's.
 
-  const icGit = pin.site_canister;
   const pollGoverned = poll && poll.controllers.length === 1 && poll.controllers[0] === icGit;
   if (!poll) {
     c.add("poll-governed", "Poll canister is governed by ic-git", UNKNOWN, "no certified controllers");
