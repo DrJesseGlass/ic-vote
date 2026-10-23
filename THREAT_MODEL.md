@@ -116,11 +116,13 @@ verdict (T3): the poll canister's only controller must be ic-git and its hash
 the build ic-git recorded for an approved commit; the serving canister's only
 controller must be the pinned governor and its hash ic-git's recorded build.
 A pin the administrator chose freely is a tripwire; the pin plus those checks
-is the claim. Which canister is ic-git in those checks comes from the bundle
-(`config.js`), not from the pin's `site_canister`, and the pin must name it:
-a pin the administrator wrote could otherwise name another instance of
-ic-git's module, with approvers of their choosing, and pass the checks
-against it.
+is the claim. Which canister is ic-git in those checks, and which contract
+on which chain is the registry, come from the bundle (`config.js`), not from
+the pin's `site_canister`, `registry_chain_id` and `registry_address`, and
+the pin must name them: a pin the administrator wrote could otherwise name
+another instance of ic-git's module, with approvers of their choosing, and
+pass the checks against it, or name a registry of their own whose records
+agree with the pin by construction.
 
 ### 2.6 Eligibility fraud / Sybil
 
