@@ -1,0 +1,71 @@
+# cargo-deny: the dependency gate. ci.yml runs `cargo deny check` on every
+# pull request, Dependabot's included, so a bump that compiles can still be
+# refused for what it brings in. It looks at the graph the poll canister's
+# module is built from: the wasm32 target, without dev-dependencies.
+#
+# The same gate, with the same checks, as ic-git's deny.toml. The dependency
+# list is short on purpose (canisters/poll/Cargo.toml says why); this is
+# what keeps a routine bump from lengthening it unnoticed.
+#
+# Why each check is here:
+#   advisories   RustSec, fetched at check time and independent of GitHub's
+#                alert pipeline, which does not carry every RustSec entry
+#                (ic-git found one on its first run, 2026-11-13).
+#   bans         one version of each crate. Two copies of a hash or curve
+#                implementation in the module is twice the code a reviewer
+#                (T3 in THREAT_MODEL.md) has to read. A sha2 0.11 or
+#                ed25519-dalek 3 bump would do exactly that while candid,
+#                ic-cdk and ic-multisig stay on digest 0.10. Every duplicate
+#                the graph carries today is listed below with the crate that
+#                pins it.
+#   licenses     the allow list is what the graph carries now; a new licence
+#                is a decision, not a surprise.
+#   sources      crates.io only. A git or path dependency from outside the
+#                workspace cannot be reproduced from a Cargo.lock alone.
+#
+# Locally: `cargo deny check` (brew install cargo-deny, or cargo install).
+
+[graph]
+targets = ["wasm32-unknown-unknown"]
+all-features = false
+exclude-dev = true
+
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+# Every entry needs its id and the reason the module is not exposed, so the
+# exception is reviewed with the code. Remove the entry when the fix lands.
+ignore = [
+    { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained; a proc-macro candid uses at build time, nothing of it is in the module. Goes when candid drops it." },
+]
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "Zlib",
+    "Unlicense",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.8
+# The poll canister is publish = false and carries no license field.
+private = { ignore = true }
+
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+# Workspace crates may depend on one another by path, without a version.
+allow-wildcard-paths = true
+skip = [
+    { crate = "syn@1", reason = "proc-macro input: binread_derive, which candid uses, is on syn 1. Build-time only, not in the module. Goes when candid drops binread." },
+    { crate = "syn@2", reason = "proc-macro input: candid_derive, ic-cdk-macros, darling, strum_macros and thiserror-impl 1 are on syn 2, serde_derive and thiserror-impl 2 on syn 3. Build-time only, not in the module." },
+    { crate = "thiserror@1", reason = "candid and ic_principal are on thiserror 1, ic-cdk on 2. Goes when candid moves." },
+    { crate = "thiserror-impl@1", reason = "the proc-macro half of thiserror 1, see above." },
+]
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
