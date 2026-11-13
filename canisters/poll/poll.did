@@ -149,7 +149,10 @@ type Pin = record {
   // certified read. What it is not: proof the declared value was ever the
   // right one. It makes a mid-window *change* visible, which is the attack
   // in THREAT_MODEL.md 2.5; it does not establish the starting point. That
-  // is what the K-of-N attestation on the module hash is for.
+  // comes from who can change this canister: a client requires its only
+  // controller to be ic-git and its module to be the build ic-git recorded
+  // for a commit the repo's approvers voted through, read from the IC's
+  // certificates and the registry (THREAT_MODEL.md 2.5, "Limit").
   poll_module_sha256 : text;
   // Registry contract address on that chain.
   registry_address : text;
@@ -244,9 +247,13 @@ service : () -> {
   // authenticated the envelope, the caller's principal is looked up in the
   // manifest's trustee list, and no signature travels inside the call. This
   // is ic-multisig's authenticated flavour, the same one ic-git's voters use.
-  // The signed flavour is reserved for the other K-of-N in this design --
-  // independent verifiers attesting `Pin.poll_module_sha256`, whose approvals
-  // must be checkable by a browser that never talks to this canister.
+  // The signed flavour is not used: the first design kept it for independent
+  // verifiers attesting `Pin.poll_module_sha256`, and governance took that
+  // role (docs/V0_STATUS.md).
+  // 
+  // `approve = false` is a rejection: on the record, weight zero. It is not
+  // ic-multisig's objection, which counts against; this canister does not
+  // offer one.
   // 
   // A later call by the same trustee replaces their earlier ballot. Returns
   // the stage's approvals after recording.

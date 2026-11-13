@@ -122,9 +122,13 @@ fn close_election(election_id: u64) -> Result<ElectionView, VoteError> {
 /// authenticated the envelope, the caller's principal is looked up in the
 /// manifest's trustee list, and no signature travels inside the call. This
 /// is ic-multisig's authenticated flavour, the same one ic-git's voters use.
-/// The signed flavour is reserved for the other K-of-N in this design --
-/// independent verifiers attesting `Pin.poll_module_sha256`, whose approvals
-/// must be checkable by a browser that never talks to this canister.
+/// The signed flavour is not used: the first design kept it for independent
+/// verifiers attesting `Pin.poll_module_sha256`, and governance took that
+/// role (docs/V0_STATUS.md).
+///
+/// `approve = false` is a rejection: on the record, weight zero. It is not
+/// ic-multisig's objection, which counts against; this canister does not
+/// offer one.
 ///
 /// A later call by the same trustee replaces their earlier ballot. Returns
 /// the stage's approvals after recording.
@@ -293,6 +297,11 @@ fn init() {
 /// code it opened them under until they close; upgrading requires
 /// `--mode reinstall`, which wipes state, and the trap message below says so
 /// instead of pretending the upgrade might work.
+///
+/// Still v3 on ic-multisig 0.2, which added `reason` to the stored trustee
+/// ballot: the field is optional in Candid, so a state written without it
+/// decodes, and nothing here writes one. Held to bytes the 0.1 module wrote
+/// by `state_written_on_ic_multisig_0_1_restores`.
 const STATE_FORMAT: u32 = 3;
 
 #[ic_cdk::pre_upgrade]

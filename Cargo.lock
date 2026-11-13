@@ -348,9 +348,9 @@ dependencies = [
 
 [[package]]
 name = "ic-multisig"
-version = "0.1.1"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bca38b78d5de733aa47b8e79cd0792eccdb3d9e55028862b111091bddeaed805"
+checksum = "0d009cd754bc8107fff7e552379c7c8ea11a602c87394993d0d194dbc83a25f8"
 dependencies = [
  "candid",
  "hex",
