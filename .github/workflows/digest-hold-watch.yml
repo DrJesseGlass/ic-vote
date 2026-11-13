@@ -1,0 +1,47 @@
+# The watch on a held dependency bump. sha2 0.11 and ed25519-dalek 3 are
+# ignored in dependabot.yml because other crates in the graph still require
+# sha2 0.10 (tools/check-digest-hold.sh says which, and why that is a
+# refusal and not a preference). An ignore with nobody watching it is a
+# dependency that never moves again, so this asks the question weekly:
+# with every direct dependency at its latest release, can the module be on
+# one sha2? While the answer is no, the run is green and says who is in the
+# way. When it is yes, the run FAILS, which emails the repository owner,
+# and the log carries the steps to lift the hold -- ic-git's
+# module-hash-watch does the same: the failure is the news.
+#
+# Like ci.yml it holds no secret and deploys nothing (THREAT_MODEL.md,
+# section 1). It changes no file; lifting the hold is a pull request a
+# person writes.
+#
+# Caveat: GitHub disables scheduled workflows on repositories with no commit
+# activity for 60 days. Re-enable it from the Actions tab if that happens.
+name: digest-hold-watch
+
+on:
+  schedule:
+    - cron: '23 7 * * 1'
+  workflow_dispatch:
+  # So a change to the check is run before it is merged, not a week after.
+  pull_request:
+    paths:
+      - tools/check-digest-hold.sh
+      - .github/workflows/digest-hold-watch.yml
+
+permissions:
+  contents: read
+
+jobs:
+  watch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Can the hold on sha2 0.10 and ed25519-dalek 2 be lifted?
+        run: tools/check-digest-hold.sh 2>&1 | tee "$RUNNER_TEMP/hold.log"
+      - name: Summary
+        if: always()
+        run: |
+          { echo '## Digest hold watch'; echo; echo '```'; cat "$RUNNER_TEMP/hold.log"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
