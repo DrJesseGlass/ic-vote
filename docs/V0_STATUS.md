@@ -327,11 +327,6 @@ than publish boards its own verifiers would reject.
   told not to propose them, and `tools/check-digest-hold.sh`, run weekly by
   `.github/workflows/digest-hold-watch.yml`, goes red when the graph can be
   on one `sha2` again. No advisory is open against either held version.
-- The `Pin` doc comment in `canisters/poll/src/types.rs` still describes the
-  K-of-N attestation of the first design. Left as it is on purpose: a comment
-  change moves the wasm hash (panic-location strings carry line numbers), and
-  a new module is a vote, a deploy and a new `ic-vote#app` record. It goes
-  with the next functional change to the canister.
 - The vendored core is 200 KB, most of it the BLS verifier, and the staged
   `app.js` is 320 KB. That is the price of verifying a certificate in the
   page rather than taking a gateway's word; ic-git's loader pays the same.

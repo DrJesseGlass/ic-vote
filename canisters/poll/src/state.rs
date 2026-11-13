@@ -1238,6 +1238,14 @@ mod tests {
         let e = s.election(id).unwrap();
         assert_eq!(e.phase, Phase::Open);
 
+        // The opening's approvals are still on the frozen manifest hash.
+        let open = e.approvals(Stage::Open).unwrap();
+        assert_eq!(
+            (open.approvals, open.rejections, open.required, open.reached),
+            (2, 1, 2, true)
+        );
+        assert_eq!(open.subject, e.manifest().unwrap().manifest_hash);
+
         // The close stage reads back as it was cast.
         let close = e.approvals(Stage::Close).unwrap();
         assert_eq!(

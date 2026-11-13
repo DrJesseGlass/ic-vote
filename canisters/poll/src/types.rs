@@ -63,7 +63,10 @@ pub struct Pin {
     /// certified read. What it is not: proof the declared value was ever the
     /// right one. It makes a mid-window *change* visible, which is the attack
     /// in THREAT_MODEL.md 2.5; it does not establish the starting point. That
-    /// is what the K-of-N attestation on the module hash is for.
+    /// comes from who can change this canister: a client requires its only
+    /// controller to be ic-git and its module to be the build ic-git recorded
+    /// for a commit the repo's approvers voted through, read from the IC's
+    /// certificates and the registry (THREAT_MODEL.md 2.5, "Limit").
     pub poll_module_sha256: String,
     /// EVM chain holding the ProvenanceRegistry for this election.
     pub registry_chain_id: u64,
