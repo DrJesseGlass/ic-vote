@@ -41,8 +41,19 @@ updates:
       - dependency-name: candid
         update-types: [version-update:semver-major, version-update:semver-minor]
       - dependency-name: ic-multisig
+      # Held, not refused: sha2 0.11 and ed25519-dalek 3 build and pass
+      # here, but ic-multisig and candid's ic_principal still require sha2
+      # 0.10, so either bump puts two copies of sha2 and digest in the
+      # module and the gate refuses it (deny.toml, bans). The two move
+      # together, when tools/check-digest-hold.sh says the graph can be on
+      # one sha2; digest-hold-watch.yml runs it weekly and goes red when it
+      # can. Updates within 0.10 and 2 still come, security ones included.
+      - dependency-name: sha2
+        versions: [">=0.11"]
+      - dependency-name: ed25519-dalek
+        versions: [">=3"]
 
-  # The workflow's actions: ci.yml runs on them.
+  # The workflows' actions: ci.yml and digest-hold-watch.yml run on them.
   - package-ecosystem: github-actions
     directory: /
     schedule:

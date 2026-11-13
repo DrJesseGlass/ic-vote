@@ -316,6 +316,13 @@ than publish boards its own verifiers would reject.
   is still run by hand, and the workflow lists the offline steps itself
   rather than calling the script, so a step added to one has to be added to
   the other.
+- `sha2` is held at 0.10 and `ed25519-dalek` at 2, one major behind. The
+  canister builds and passes on the new ones; `ic-multisig` and candid's
+  `ic_principal` still require `sha2` 0.10, and two copies of a hash
+  implementation in the module is what `deny.toml` refuses. Dependabot is
+  told not to propose them, and `tools/check-digest-hold.sh`, run weekly by
+  `.github/workflows/digest-hold-watch.yml`, goes red when the graph can be
+  on one `sha2` again. No advisory is open against either held version.
 - The `Pin` doc comment in `canisters/poll/src/types.rs` still describes the
   K-of-N attestation of the first design. Left as it is on purpose: a comment
   change moves the wasm hash (panic-location strings carry line numbers), and
