@@ -40,7 +40,12 @@ jobs:
         with:
           node-version: 24
       - name: Can the hold on sha2 0.10 and ed25519-dalek 2 be lifted?
-        run: tools/check-digest-hold.sh 2>&1 | tee "$RUNNER_TEMP/hold.log"
+        # pipefail, spelled out: a `run` step's default shell is `bash -e`
+        # without it, and the step would then take tee's exit status, so
+        # the one exit this workflow exists to report could never fail it.
+        run: |
+          set -o pipefail
+          tools/check-digest-hold.sh 2>&1 | tee "$RUNNER_TEMP/hold.log"
       - name: Summary
         if: always()
         run: |
