@@ -15,7 +15,7 @@ Which piece: the poll canister (its id, on mainnet or a local replica), the
 ballot page (the URL it was served from), the CLI verifier
 (`tools/verify-election.mjs`), the staging and push tools
 (`tools/stage-ic-git.sh`, `tools/push-ic-git.sh`), or `tools/check.sh`. The
-commit you are on, or the commit the page's verdict names.
+commit you are on, or the pinned release the page shows.
 
 ## What you did
 

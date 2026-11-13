@@ -14,10 +14,10 @@
 #   bans         one version of each crate. Two copies of a hash or curve
 #                implementation in the module is twice the code a reviewer
 #                (T3 in THREAT_MODEL.md) has to read. A sha2 0.11 or
-#                ed25519-dalek 3 bump would do exactly that while candid,
-#                ic-cdk and ic-multisig stay on digest 0.10. Every duplicate
-#                the graph carries today is listed below with the crate that
-#                pins it.
+#                ed25519-dalek 3 bump would do exactly that while
+#                ic-multisig and candid's ic_principal stay on sha2 0.10.
+#                Every duplicate the graph carries today is listed below
+#                with the crate that pins it.
 #   licenses     the allow list is what the graph carries now; a new licence
 #                is a decision, not a surprise.
 #   sources      crates.io only. A git or path dependency from outside the
