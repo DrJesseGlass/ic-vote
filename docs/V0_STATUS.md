@@ -311,7 +311,11 @@ than publish boards its own verifiers would reject.
 - `config.pollCanisterId` is `null` and must be set at deploy time. Until then
   the page reports RED with "nothing to verify", which is the right thing for
   it to say.
-- No CI. `tools/check.sh` is the thing CI should run.
+- CI (`.github/workflows/ci.yml`) runs the offline half of `tools/check.sh`
+  and the dependency gate (`deny.toml`) on every pull request. The live half
+  is still run by hand, and the workflow lists the offline steps itself
+  rather than calling the script, so a step added to one has to be added to
+  the other.
 - The `Pin` doc comment in `canisters/poll/src/types.rs` still describes the
   K-of-N attestation of the first design. Left as it is on purpose: a comment
   change moves the wasm hash (panic-location strings carry line numbers), and

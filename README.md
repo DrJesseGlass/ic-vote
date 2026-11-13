@@ -71,6 +71,12 @@ is the repo's app canister. Last, "publish site record to the EVM
 registry" in the console attests the served page on chain as `NAME#site`;
 with votes required, that is the approved page.
 
+## Reporting
+
+A bug: https://github.com/DrJesseGlass/ic-vote/issues/new/choose. A security
+problem: privately, through the form [SECURITY.md](SECURITY.md) names, never
+in a public issue.
+
 ## Documents
 
 | File | What it holds |
@@ -79,6 +85,7 @@ with votes required, that is the approved page.
 | [THREAT_MODEL.md](THREAT_MODEL.md) | Enumerated trust set; coercion resistance stated honestly |
 | [ROADMAP.md](ROADMAP.md) | The V0-V3 ladder, with verified IC primitive status |
 | [docs/V0_STATUS.md](docs/V0_STATUS.md) | What is built vs. stubbed, and how each stub fails closed |
+| [SECURITY.md](SECURITY.md) | Where a vulnerability goes, what is in scope, how a fix ships |
 
 ## Layout
 

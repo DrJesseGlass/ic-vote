@@ -2,6 +2,9 @@
 name = "ic_vote_poll"
 version = "0.1.0"
 edition = "2021"
+# A canister, not a library for crates.io. Also what lets the dependency
+# gate (deny.toml) skip this crate when it checks licences.
+publish = false
 
 [lib]
 crate-type = ["cdylib", "lib"]

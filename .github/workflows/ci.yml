@@ -1,0 +1,57 @@
+# Tests every pull request, Dependabot's included: the offline half of
+# tools/check.sh, step by step, and the dependency gate (deny.toml). The
+# live half (`tools/check.sh --live`: a local replica, an election end to
+# end, the tamper cases) is run by hand before a push to ic-git; this only
+# says the change compiles, passes, and brings in nothing the gate refuses.
+#
+# It holds no secret and deploys nothing, and must stay that way: the CI
+# pipeline is deliberately not in the trust set (THREAT_MODEL.md, section 1).
+# What runs is decided by a signed push to ic-git and its voters, not here.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      # rust-toolchain.toml pins the channel and the wasm target; rustup on
+      # the runner installs them on first use. --locked on both steps: the
+      # committed Cargo.lock is what tools/stage-ic-git.sh builds app.wasm
+      # from, so a change that would rewrite it fails here rather than
+      # passing on a dependency graph nobody committed.
+      - name: Canister tests
+        run: cargo test --locked -q -p ic_vote_poll
+      - name: Wasm build
+        run: cargo build --locked -q --target wasm32-unknown-unknown --release -p ic_vote_poll
+      - name: Every tracked file is pure ASCII
+        run: node tools/check-ascii.mjs
+      - name: Vendored ic-git core matches its header
+        run: node tools/sync-ic-git-core.mjs --verify
+      - name: Frontend library tests (offline)
+        run: node tools/test-site-lib.mjs
+
+  # The dependency gate: RustSec advisories, one version of each crate,
+  # licences, crates.io only. deny.toml says why each check is there and
+  # carries every exception with its reason. Fails the pull request on a
+  # new advisory even when the code did not change, so a red main here
+  # means the advisory database moved, not the code.
+  deny:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          arguments: --locked

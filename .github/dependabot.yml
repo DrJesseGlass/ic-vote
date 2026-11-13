@@ -1,0 +1,66 @@
+# Dependabot: security updates for every advisory against a dependency in
+# the repo (GitHub's advisory database includes RustSec), and routine
+# version updates on the schedules below. Each update is a pull request,
+# tested by ci.yml; none reaches the poll canister until main is staged and
+# pushed, signed, to ic-git and the repo's voters approve the push (README,
+# "Why this is a separate repo"). A Cargo.lock change changes the poll
+# canister's module hash, so it ships as a new `ic-vote#app` record, and an
+# election opened before it stays pinned to the module it opened on
+# (THREAT_MODEL.md 2.5).
+#
+# Dependabot pushes its pull requests to branches named dependabot/<...>.
+# Git cannot create those while a branch named plainly `dependabot` exists
+# (a ref cannot be both a file and a directory), and Dependabot then opens
+# nothing, silently from the repo's side. Never name a branch `dependabot`;
+# the job log under Insights > Dependency graph > Dependabot shows the
+# failure when it happens.
+version: 2
+updates:
+  # The one workspace: canisters/poll, built from the root Cargo.lock, the
+  # input to the module hash an election pins.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: deps
+    groups:
+      # Patch and minor bumps arrive as one pull request a week rather than
+      # one per crate; a major bump, or a security update, comes on its own.
+      cargo-minor-patch:
+        update-types: [minor, patch]
+    ignore:
+      # Kept at the versions ic-git uses (canisters/poll/Cargo.toml): at 0.x
+      # a minor bump is a breaking one, so only patches come on their own.
+      # ic-multisig is this project's own crate, shared with ic-git, and
+      # moves by hand with its releases, in both repos together.
+      - dependency-name: ic-cdk
+        update-types: [version-update:semver-major, version-update:semver-minor]
+      - dependency-name: candid
+        update-types: [version-update:semver-major, version-update:semver-minor]
+      - dependency-name: ic-multisig
+
+  # The workflow's actions: ci.yml runs on them.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: ci
+    groups:
+      actions:
+        patterns: ["*"]
+
+# Not covered, deliberately:
+#   rust-toolchain.toml   the compiler version is in the module's metadata,
+#                         so a bump changes the module hash; it moves by
+#                         hand, with ic-git's.
+#   site/                 no package manager and no npm dependencies. The
+#                         one vendored piece, site/lib/ic-git-core.js, is
+#                         ic-git's core (with its bundle of @noble/curves)
+#                         and moves with tools/sync-ic-git-core.mjs, which
+#                         records the ic-git commit it came from. An
+#                         advisory against it is ic-git's to fix first.
