@@ -3,6 +3,10 @@
 # live half (`tools/check.sh --live`: a local replica, an election end to
 # end, the tamper cases) is run by hand before a push to ic-git; this only
 # says the change compiles, passes, and brings in nothing the gate refuses.
+#
+# It holds no secret and deploys nothing, and must stay that way: the CI
+# pipeline is deliberately not in the trust set (THREAT_MODEL.md, section 1).
+# What runs is decided by a signed push to ic-git and its voters, not here.
 name: ci
 
 on:

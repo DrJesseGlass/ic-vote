@@ -68,9 +68,10 @@ this repo and the repo's app canister, as the `ic-vote#site` and
 ## How a fix ships
 
 A fix is a push like any other: staged from `main`, pushed to ic-git
-signed, held until the repo's voters approve it, installed by ic-git's
-deploy queue, and recorded on chain (README). An election pins both
-module hashes for its voting window, so a fix that lands while one is
-open turns its verdict RED, and that is disclosed rather than avoided
-(THREAT_MODEL.md 2.5). The advisory is published, with credit to the
-reporter if wanted, once the fixed build is the recorded one.
+signed, held until its voters approve it when the repo requires votes,
+installed by ic-git's deploy queue, and recorded on chain (README). An
+election pins both module hashes for its voting window, so a fix that
+lands while one is open turns its verdict RED, and that is disclosed
+rather than avoided (THREAT_MODEL.md 2.5). The advisory is published,
+with credit to the reporter if wanted, once the fixed build is the
+recorded one.
