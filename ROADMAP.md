@@ -342,19 +342,36 @@ What V0 needs from ic-git, and where each stands:
    commit, each install recorded on chain as `<repo>#app` -- and ic-git
    itself is controlled by a governor canister with no controllers, whose
    installs are votes of ic-git's approvers, recorded as `ic-git#canister`.
-   ic-vote's poll canister has been governed since 2026-10-08. The page
+   ic-vote's poll canister has been governed since 2026-10-08. The latest
+   install under that rule was 2026-11-13: ic-git commit 16da00f (this
+   repo's 3497f00: the ic-cdk and candid patch releases and the move to
+   ic-multisig 0.2, the first new module since the canister's first
+   install on 2026-09-24), pushed signed, approved 1 of 1, and installed
+   as an upgrade to module
+   9c84e6117c836607404bee7def3548a04d2863fcdf2cbecc93abff901d35c60f, with
+   `ic-vote#app` written in tx
+   0x681c95d208ef8cf5835a07fda0e7622571f566ab594457fb573a686cf2792584. The
+   canister held no elections at the time, so nothing was pinned to the
+   module it replaced. The page
    checks both canisters that way (`site/lib/verifier.js`, section 4), and
    the trusted verifier set is gone from `config.js`; the governor pin took
    its place. Not given by this: a count of independent reproductions by
    parties outside the approvers (THREAT_MODEL.md T3 is now the approvers).
 3. **`registry_publish_site` exercised on mainnet** -- done. ic-git's
    `evm_registry_publish_site` has written `ic-vote#site` from the mainnet
-   canister's EOA to the Sepolia registry, most recently 2026-09-30 (tx
+   canister's EOA to the Sepolia registry, most recently 2026-11-13 (tx
+   0x82997803be368e1777d20f6a71f6ac90128504fe8211f34649c49d4f86f649cc,
+   ic-git commit 16da00f; the page is byte for byte the one served from
+   the commit before it, 55ed3b9, and only the commit is new), verified by
+   ic-git's tools/verify.mjs: served commit and sha256 equal the record's,
+   a clone reproduces the served bytes, and the entrypoint's references
+   are enforceable. The record of
+   2026-09-30 (tx
    0x8375da181dd742cc4c223bfb80a626e89e82e8bafd8ba2f59f3a458860decf10,
-   ic-git commit 4c500e4, the first with the stylesheet inlined), verified
-   by ic-git's tools/verify.mjs, its browser loader, and its extension,
-   which opens the page without the stop page and shows YELLOW; the
-   loader's own record went through the same path.
+   ic-git commit 4c500e4, the first with the stylesheet inlined) was also
+   verified by ic-git's browser loader and its extension, which opens the
+   page without the stop page and shows YELLOW; the loader's own record
+   went through the same path.
 4. **Multi-chain EVM config** -- currently single-chain (Sepolia); needed to
    put the election's provenance on the chain the organization actually uses.
 
