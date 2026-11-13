@@ -42,9 +42,10 @@ updates:
         update-types: [version-update:semver-major, version-update:semver-minor]
       - dependency-name: ic-multisig
       # Held, not refused: sha2 0.11 and ed25519-dalek 3 build and pass
-      # here, but ic-multisig and candid's ic_principal still require sha2
-      # 0.10, so either bump puts two copies of sha2 and digest in the
-      # module and the gate refuses it (deny.toml, bans). The two move
+      # here, but candid's ic_principal still requires sha2 0.10 (ic-multisig
+      # takes either since 0.2.1), so either bump puts two copies of sha2
+      # and digest in the module and the gate refuses it (deny.toml, bans).
+      # The two move
       # together, when tools/check-digest-hold.sh says the graph can be on
       # one sha2; digest-hold-watch.yml runs it weekly and goes red when it
       # can. Updates within 0.10 and 2 still come, security ones included.

@@ -516,6 +516,16 @@ impl Store {
         }
         let subject = e.subject(stage)?;
         let policy = e.policy();
+        // ic-multisig 0.2 has a third decision, `Object`: a "no" with a
+        // reason that counts -1, so it costs an approval to overcome and at
+        // K = N - 1 cannot be overcome at all. It is not offered here. This
+        // endpoint is the only writer of trustee ballots and it takes a
+        // bool, so a stored ballot is an approval or a rejection, and
+        // `Approvals` (approvals, rejections, required, reached) remains
+        // everything a verifier needs to recount a stage. Offering it would
+        // be a change to poll.did, to check H in tools/verify-election.mjs
+        // and to what the page shows, made on purpose and not by a version
+        // bump.
         let decision = if approve {
             Decision::Approve
         } else {
@@ -1203,6 +1213,79 @@ mod tests {
     fn approvals(s: &Store, id: u64, stage: Stage) -> (u32, u32, bool) {
         let a = s.election(id).unwrap().approvals(stage).unwrap();
         (a.approvals, a.required, a.reached)
+    }
+
+    /// Stable state written by the module built on ic-multisig 0.1, which
+    /// is what an upgrade to this one has to restore. 0.2 added a field to
+    /// the stored ballot (`reason`), and `post_upgrade` traps on a state it
+    /// cannot decode, taking every election with it; so this is pinned to
+    /// bytes the old module really wrote, not to a struct shaped like them.
+    ///
+    /// The fixture is `candid::encode_args((3u32, store))`, hex, from commit
+    /// 79ccfc5 (ic-multisig 0.1.1): the 2-of-3 draft of
+    /// `drafted_with_trustees`, with p(20) approving, p(21) rejecting and
+    /// p(22) approving the opening; opened; one ballot cast; then p(20)
+    /// approving and p(21) rejecting the close.
+    #[test]
+    fn state_written_on_ic_multisig_0_1_restores() {
+        let hex: String = include_str!("fixtures/state_v3_multisig_0_1.hex")
+            .split_whitespace()
+            .collect();
+        let bytes = hex::decode(hex).unwrap();
+        let (version, s): (u32, Store) = candid::decode_args(&bytes).unwrap();
+        assert_eq!(version, 3);
+        let id = s.elections[0].id;
+        let e = s.election(id).unwrap();
+        assert_eq!(e.phase, Phase::Open);
+
+        // The close stage reads back as it was cast.
+        let close = e.approvals(Stage::Close).unwrap();
+        assert_eq!(
+            (close.approvals, close.rejections, close.required, close.reached),
+            (1, 1, 2, false)
+        );
+        assert_eq!(
+            close.ballots,
+            vec![
+                TrusteeBallot { trustee: p(20), approve: true, at: 310 },
+                TrusteeBallot { trustee: p(21), approve: false, at: 320 },
+            ]
+        );
+        // Every stored ballot, the opening's superseded subject included,
+        // is one of the two decisions 0.1 had, with no reason.
+        let stored: Vec<&Approval> = e.approvals.values().flatten().collect();
+        assert_eq!(stored.len(), 5);
+        assert!(stored
+            .iter()
+            .all(|a| a.reason.is_none() && a.decision != Decision::Object));
+
+        // And the restored state goes on working: the third trustee's
+        // approval reaches the threshold and the close goes through.
+        let mut s = s;
+        let a = s.approve(p(22), id, Stage::Close, true, 330).unwrap();
+        assert_eq!((a.approvals, a.reached), (2, true));
+        s.close(p(1), id, 400).unwrap();
+    }
+
+    /// ic-multisig 0.2 has a third decision, an objection, which counts
+    /// against. This canister does not offer it: `approve` takes a bool, and
+    /// a "no" is a rejection, weight zero. Nothing it stores can be one.
+    #[test]
+    fn a_trustees_no_is_a_rejection_never_an_objection() {
+        let (mut s, id) = drafted_with_trustees(2);
+        s.approve(p(20), id, Stage::Open, true, 150).unwrap();
+        s.approve(p(21), id, Stage::Open, true, 155).unwrap();
+        // Under 2 of 3 an objection from the third trustee would hold the
+        // opening (2 approvals < 1 objection + 2). A rejection does not.
+        let a = s.approve(p(22), id, Stage::Open, false, 160).unwrap();
+        assert_eq!((a.approvals, a.rejections, a.reached), (2, 1, true));
+        let e = s.election(id).unwrap();
+        assert!(e
+            .approvals
+            .values()
+            .flatten()
+            .all(|a| a.decision != Decision::Object && a.reason.is_none()));
+        s.open(p(1), id, 200).unwrap();
     }
 
     #[test]

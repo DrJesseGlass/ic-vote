@@ -56,7 +56,7 @@ build, ic-git under its governor and running the `ic-git#canister` build.
 
 | Piece | Where | Evidence |
 |---|---|---|
-| Election lifecycle, roll, one-ballot-per-credential | `canisters/poll/src/state.rs` | 35 unit tests |
+| Election lifecycle, roll, one-ballot-per-credential | `canisters/poll/src/state.rs` | 50 unit tests |
 | Trustee K-of-N gate on opening and closing (the `ic-multisig` crate, shared with ic-git) | `state.rs::set_trustees`, `approve`, `open`, `close` | `opening_waits_for_k_trustees_to_approve_the_manifest`, `closing_waits_for_trustees_to_attest_the_count`; check H in `tools/verify-election.mjs`; 4 tamper cases |
 | Domain-separated, length-prefixed hash rules | `canisters/poll/src/hashing.rs` | property tests over every tree shape |
 | Manifest freezing (question, options, roll, pin, trustees) at open | `state.rs::open` | `roll_and_pin_are_frozen_once_open`, `manifest_is_readable_in_draft_and_is_what_open_freezes` |
@@ -237,7 +237,11 @@ approves bytes, not a step label, and a trustee who approves the close is
 attesting the count. The rules -- who counts, one ballot per trustee, later
 ballots replacing earlier ones, threshold reached or not -- are the
 [`ic-multisig`](https://crates.io/crates/ic-multisig) crate, the same
-code ic-git's voters use to gate its deploy queue, at the same version.
+code ic-git's voters use to gate its deploy queue, on the same release line
+(0.2). That line added objections, a "no" with a reason that counts against;
+`approve` here takes a bool and records an approval or a rejection, so no
+trustee ballot is one, and the counts both verifiers recompute are still
+the whole rule.
 The trustee is the caller of `approve`; the IC authenticates the envelope,
 and no signature travels in the call (the crate's *authenticated* flavour).
 
@@ -317,9 +321,9 @@ than publish boards its own verifiers would reject.
   rather than calling the script, so a step added to one has to be added to
   the other.
 - `sha2` is held at 0.10 and `ed25519-dalek` at 2, one major behind. The
-  canister builds and passes on the new ones; `ic-multisig` and candid's
-  `ic_principal` still require `sha2` 0.10, and two copies of a hash
-  implementation in the module is what `deny.toml` refuses. Dependabot is
+  canister builds and passes on the new ones, and `ic-multisig` 0.2.1 takes
+  either; candid's `ic_principal` still requires `sha2` 0.10, and two copies
+  of a hash implementation in the module is what `deny.toml` refuses. Dependabot is
   told not to propose them, and `tools/check-digest-hold.sh`, run weekly by
   `.github/workflows/digest-hold-watch.yml`, goes red when the graph can be
   on one `sha2` again. No advisory is open against either held version.

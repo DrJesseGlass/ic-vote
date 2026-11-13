@@ -11,10 +11,10 @@
 # dependency gate refuses (deny.toml, bans). ed25519-dalek 3 needs sha2
 # 0.11, so the two move together or not at all.
 #
-# The crates in the way are not all reachable by a compatible update: one
-# is a direct dependency held at an older line (ic-multisig), another comes
-# in through candid (ic_principal). So the question asked here is the
-# widest one: with EVERY direct dependency at its latest release, is there
+# What is in the way is not always reachable by a compatible update: today
+# it is ic_principal, which comes in through candid, and it has been a
+# direct dependency held on an older line (ic-multisig, until 0.2.1 took
+# either sha2). So the question asked here is the widest one: with EVERY direct dependency at its latest release, is there
 # one sha2 in the graph? This makes that bump in a throwaway copy of the
 # workspace, resolves it, and reads the result:
 #
