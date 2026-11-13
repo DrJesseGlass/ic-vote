@@ -98,7 +98,7 @@ Run it all: `tools/check.sh --live`.
 | BLS verification of the election's own `certified_head` certificate (check G) | a certificate verifier for arbitrary paths, exported from ic-git's core (its reader is built around the two canister paths it needs) | the page and `tools/verify-election.mjs` take that certificate apart structurally and say so. The module-hash and controller reads do NOT have this gap: they go through the core |
 | Freshness bound on that certificate | same | `certificateTime()` shows it; nothing relies on it. The core applies a real bound to the certificates it verifies |
 | Trusted verifier set | gone: ic-git dep. 2 was superseded by governance | the governor pin in `config.js` took its place (ROADMAP.md, "Dependencies on ic-git") |
-| Real registry records for this repo | done | `ic-vote#site` (2026-09-30) and `ic-vote#app` (2026-10-08) are on Sepolia; `registryRecord()` reads them |
+| Real registry records for this repo | done | `ic-vote#site` (since 2026-09-30) and `ic-vote#app` (since 2026-10-08) are on Sepolia, both rewritten by the deploy of 2026-11-13 (ROADMAP.md, "Dependencies on ic-git"); `registryRecord()` reads them |
 | Multi-chain registry | ic-git dep. 4 | `config.registries` pins the registry contract and an RPC per chain id, Sepolia only until ic-git deploys elsewhere; the election's pin must name a listed chain and its contract, and that is the one read |
 | Voter enrolment | T4, a governance question | demo Ed25519 key in `localStorage`, labelled as such in the UI |
 

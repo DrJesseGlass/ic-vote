@@ -344,8 +344,10 @@ What V0 needs from ic-git, and where each stands:
    installs are votes of ic-git's approvers, recorded as `ic-git#canister`.
    ic-vote's poll canister has been governed since 2026-10-08. The latest
    install under that rule was 2026-11-13: ic-git commit 16da00f (this
-   repo's 3497f00, the move to ic-multisig 0.2), pushed signed, approved 1
-   of 1, and installed as an upgrade to module
+   repo's 3497f00: the ic-cdk and candid patch releases and the move to
+   ic-multisig 0.2, the first new module since the canister's first
+   install on 2026-09-24), pushed signed, approved 1 of 1, and installed
+   as an upgrade to module
    9c84e6117c836607404bee7def3548a04d2863fcdf2cbecc93abff901d35c60f, with
    `ic-vote#app` written in tx
    0x681c95d208ef8cf5835a07fda0e7622571f566ab594457fb573a686cf2792584. The
